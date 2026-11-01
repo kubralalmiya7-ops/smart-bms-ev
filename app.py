@@ -164,68 +164,27 @@ st.divider()
 st.subheader("🔋 Battery Overview")
 
 col1, col2 = st.columns([1, 2])
-
 # BATTERY CHARGE DISPLAY
 
 with col1:
 
     st.markdown("### Battery Charge")
 
-    st.markdown(f"""
-    <div style="
-        background:#1C2A38;
-        padding:25px;
-        border-radius:15px;
-        text-align:center;
-        border:1px solid #40566B;
-    ">
+    st.markdown(
+        f"<h1 style='color:#25C987; font-size:48px;'>{soc}%</h1>",
+        unsafe_allow_html=True
+    )
 
-        <div style="
-            display:flex;
-            justify-content:center;
-            align-items:center;
-            gap:5px;
-        ">
+    st.progress(soc / 100)
 
-            <div style="
-                width:190px;
-                height:75px;
-                border:4px solid #DCE5ED;
-                border-radius:12px;
-                padding:5px;
-            ">
+    st.caption("State of Charge (SoC)")
 
-                <div style="
-                    height:100%;
-                    width:{soc}%;
-                    background:#25C987;
-                    border-radius:5px;
-                "></div>
-
-            </div>
-
-            <div style="
-                width:10px;
-                height:27px;
-                background:#DCE5ED;
-                border-radius:3px;
-            "></div>
-
-        </div>
-
-        <h1 style="
-            color:#25C987;
-            margin-top:15px;
-        ">
-            {soc}%
-        </h1>
-
-        <p style="color:#BFD0DF;">
-            State of Charge (SoC)
-        </p>
-
-    </div>
-    """, unsafe_allow_html=True)
+    if soc >= 70:
+        st.success("Battery charge level: High")
+    elif soc >= 30:
+        st.warning("Battery charge level: Moderate")
+    else:
+        st.error("Battery charge level: Low")
 
 # BATTERY PARAMETERS
 
