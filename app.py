@@ -1,26 +1,26 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
 
 # ==========================================
 # PAGE CONFIGURATION
 # ==========================================
 
 st.set_page_config(
-    page_title="Smart BMS | EV Dashboard",
+    page_title="Smart BMS | EV Control Centre",
     page_icon="🔋",
     layout="wide"
 )
 
 # ==========================================
-# CUSTOM CSS
+# PROFESSIONAL DASHBOARD CSS
 # ==========================================
 
 st.markdown("""
 <style>
-
 .stApp {
-    background: #0B1420;
+    background: #0A111C;
     color: #EAF2F8;
 }
 
@@ -28,42 +28,41 @@ header {
     background: transparent !important;
 }
 
-h1, h2, h3, p, label {
-    color: #EAF2F8 !important;
-}
-
-[data-testid="stSidebar"] {
-    background: #111F2D;
-}
-
 .block-container {
+    max-width: 1450px;
     padding-top: 2rem;
     padding-bottom: 2rem;
 }
 
+h1, h2, h3, h4, p, label {
+    color: #EAF2F8 !important;
+}
+
+[data-testid="stSidebar"] {
+    background: #111E2D;
+}
+
 [data-testid="stMetric"] {
-    background: #172838;
+    background: #172638;
     padding: 16px;
     border-radius: 12px;
-    border: 1px solid #2B4357;
+    border: 1px solid #30465D;
 }
 
 [data-testid="stMetricValue"] {
     color: #FFFFFF !important;
-    font-size: 25px !important;
-    font-weight: bold;
 }
 
 [data-testid="stMetricLabel"] {
-    color: #B9CDDD !important;
+    color: #AFC3D6 !important;
 }
 
 div[data-testid="stAlert"] {
-    border-radius: 12px;
+    border-radius: 10px;
 }
 
 hr {
-    border-color: #2B4357;
+    border-color: #26394D;
 }
 
 </style>
@@ -71,7 +70,7 @@ hr {
 
 
 # ==========================================
-# BATTERY SIMULATION DATA
+# SIMULATION SCENARIOS
 # ==========================================
 
 scenarios = {
@@ -88,12 +87,11 @@ scenarios = {
 # SIDEBAR
 # ==========================================
 
-st.sidebar.title("🔋 SMART BMS")
-
-st.sidebar.caption("Battery simulation control")
+st.sidebar.markdown("## 🔋 SMART BMS")
+st.sidebar.caption("EV Battery Control Centre")
 
 scenario = st.sidebar.selectbox(
-    "Select Operating Condition",
+    "Operating Condition",
     list(scenarios.keys())
 )
 
@@ -101,15 +99,15 @@ voltage, current, temperature, soc = scenarios[scenario]
 
 st.sidebar.divider()
 
-st.sidebar.markdown("### Battery Information")
-st.sidebar.write("Battery Type: Lithium-ion")
+st.sidebar.markdown("### Battery Configuration")
+st.sidebar.write("Battery Chemistry: Lithium-ion")
 st.sidebar.write("Nominal Voltage: 48 V")
-st.sidebar.write("Monitoring: Simulated")
-st.sidebar.write("System: EV Battery")
+st.sidebar.write("Monitoring Mode: Simulation")
+st.sidebar.write("System: Electric Vehicle")
 
 st.sidebar.info(
-    "Select a condition to observe changes "
-    "in battery parameters and safety alerts."
+    "Change the operating condition to test "
+    "different battery behaviours."
 )
 
 
@@ -148,24 +146,21 @@ else:
 # HEADER
 # ==========================================
 
-st.markdown(
-    "<h1 style='margin-bottom:0;'>🔋 SMART BATTERY MANAGEMENT SYSTEM</h1>",
-    unsafe_allow_html=True
-)
+st.markdown("""
+<h1 style="font-size:34px; margin-bottom:0;">
+🔋 SMART BATTERY MANAGEMENT SYSTEM
+</h1>
+<p style="color:#8FAFC6 !important; font-size:16px;">
+ELECTRIC VEHICLE | BATTERY MONITORING & SAFETY CONTROL CENTRE
+</p>
+""", unsafe_allow_html=True)
 
-st.markdown(
-    "<p style='color:#8FAFC6 !important;'>"
-    "Electric Vehicle Battery Monitoring & Safety Control Centre"
-    "</p>",
-    unsafe_allow_html=True
-)
+header1, header2 = st.columns([3, 1])
 
-left, right = st.columns([3, 1])
+with header1:
+    st.caption("BATTERY PERFORMANCE MONITORING")
 
-with left:
-    st.caption("BATTERY MONITORING DASHBOARD")
-
-with right:
+with header2:
     if status == "NORMAL":
         st.success("● SYSTEM NORMAL")
     elif status == "WARNING":
@@ -174,64 +169,139 @@ with right:
         st.error("● CRITICAL ALERT")
 
 st.info(
-    "SIMULATION MODE — All displayed readings are simulated "
-    "and are not obtained from a physical battery."
+    "SIMULATION MODE — All readings are simulated "
+    "and are not measured from a physical battery."
 )
 
 st.divider()
 
 
 # ==========================================
-# TOP BATTERY INDICATORS
+# CIRCULAR GAUGE FUNCTION
 # ==========================================
 
-st.subheader("⚡ Battery Performance Indicators")
+def create_gauge(title, value, unit, maximum, warning, critical):
+
+    if value >= critical or value < warning[0]:
+        gauge_color = "#FF4B5C"
+    elif value >= warning[1] or value < warning[0]:
+        gauge_color = "#F5A623"
+    else:
+        gauge_color = "#24D6A0"
+
+    fig = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=value,
+            number={
+                "suffix": f" {unit}",
+                "font": {
+                    "size": 29,
+                    "color": "#FFFFFF"
+                }
+            },
+            title={
+                "text": title,
+                "font": {
+                    "size": 19,
+                    "color": "#D8E6F2"
+                }
+            },
+            gauge={
+                "shape": "angular",
+                "axis": {
+                    "range": [0, maximum],
+                    "tickcolor": "#AFC3D6",
+                    "tickfont": {
+                        "color": "#AFC3D6",
+                        "size": 10
+                    }
+                },
+                "bar": {
+                    "color": gauge_color,
+                    "thickness": 0.25
+                },
+                "bgcolor": "#172638",
+                "borderwidth": 0,
+                "steps": [
+                    {
+                        "range": [0, maximum],
+                        "color": "#26394D"
+                    }
+                ],
+                "threshold": {
+                    "line": {
+                        "color": "#FFFFFF",
+                        "width": 3
+                    },
+                    "thickness": 0.8,
+                    "value": value
+                }
+            }
+        )
+    )
+
+    fig.update_layout(
+        height=270,
+        margin=dict(l=25, r=25, t=65, b=15),
+        paper_bgcolor="#111E2D",
+        font={"color": "#FFFFFF"}
+    )
+
+    return fig
+
+
+# ==========================================
+# THREE CIRCULAR GAUGES
+# ==========================================
+
+st.subheader("⚡ LIVE BATTERY PARAMETERS")
 
 g1, g2, g3 = st.columns(3)
 
-# Voltage Gauge
-
 with g1:
-    st.markdown("### Voltage")
-    st.metric(
-        "Battery Voltage",
-        f"{voltage:.1f} V",
-        help="Illustrative voltage reading"
+    fig_voltage = create_gauge(
+        "BATTERY VOLTAGE",
+        voltage,
+        "V",
+        60,
+        (42, 54),
+        56
     )
-
-    st.progress(
-        min(max(voltage / 60, 0.0), 1.0),
-        text="Voltage level"
+    st.plotly_chart(
+        fig_voltage,
+        use_container_width=True,
+        config={"displayModeBar": False}
     )
-
-# Current Gauge
 
 with g2:
-    st.markdown("### Current")
-    st.metric(
-        "Battery Current",
-        f"{current:.1f} A",
-        help="Illustrative current reading"
+    fig_current = create_gauge(
+        "BATTERY CURRENT",
+        current,
+        "A",
+        35,
+        (0, 20),
+        25
     )
-
-    st.progress(
-        min(max(current / 35, 0.0), 1.0),
-        text="Current level"
+    st.plotly_chart(
+        fig_current,
+        use_container_width=True,
+        config={"displayModeBar": False}
     )
-
-# Temperature Gauge
 
 with g3:
-    st.markdown("### Temperature")
-    st.metric(
-        "Battery Temperature",
-        f"{temperature} °C",
-        help="Illustrative temperature reading"
+    fig_temperature = create_gauge(
+        "BATTERY TEMPERATURE",
+        temperature,
+        "°C",
+        70,
+        (0, 45),
+        55
     )
-
-    st.progress(
-        min(max(temperature / 70, 0.0), 1.0),
-        text="Temperature level"
+    st.plotly_chart(
+        fig_temperature,
+        use_container_width=True,
+        config={"displayModeBar": False}
     )
 
 
@@ -239,78 +309,78 @@ st.divider()
 
 
 # ==========================================
-# BATTERY CHARGE AND HEALTH
+# BATTERY CHARGE INDICATOR
 # ==========================================
 
-st.subheader("🔋 Battery Status Overview")
+st.subheader("🔋 BATTERY CHARGE STATUS")
 
-b1, b2 = st.columns([1, 2])
+charge_col1, charge_col2 = st.columns([1, 2])
 
-with b1:
+with charge_col1:
 
-    st.markdown("### State of Charge")
-
-    st.markdown(
-        f"""
-        <div style="
-            background:#172838;
-            border:1px solid #2B4357;
-            padding:22px;
-            border-radius:15px;
-            text-align:center;
-        ">
-        <div style="
-            font-size:46px;
-            font-weight:bold;
-            color:#25C987;
-        ">
-        {soc}%
-        </div>
-        <div style="color:#B9CDDD;">
-        BATTERY CHARGE
-        </div>
-        </div>
-        """,
-        unsafe_allow_html=True
+    charge_fig = go.Figure(
+        go.Pie(
+            values=[soc, 100 - soc],
+            hole=0.78,
+            marker={
+                "colors": ["#24D6A0", "#26394D"]
+            },
+            textinfo="none",
+            hoverinfo="skip",
+            sort=False
+        )
     )
 
-    st.progress(soc / 100)
+    charge_fig.add_annotation(
+        text=f"<b>{soc}%</b><br><span style='font-size:12px'>SoC</span>",
+        showarrow=False,
+        font={
+            "size": 27,
+            "color": "#FFFFFF"
+        }
+    )
 
-with b2:
+    charge_fig.update_layout(
+        height=220,
+        showlegend=False,
+        margin=dict(l=10, r=10, t=10, b=10),
+        paper_bgcolor="#0A111C"
+    )
 
-    st.markdown("### Battery Operating Condition")
+    st.plotly_chart(
+        charge_fig,
+        use_container_width=True,
+        config={"displayModeBar": False}
+    )
 
-    st.metric("Operating Mode", scenario)
+with charge_col2:
+
+    st.markdown("### BATTERY CONDITION")
 
     if status == "NORMAL":
-        st.success(
-            "Battery is operating within the "
-            "illustrative demo limits."
-        )
+        st.success("NORMAL — Battery parameters within demo limits.")
 
     elif status == "WARNING":
-        st.warning(
-            "An abnormal battery parameter has been detected."
-        )
+        st.warning("WARNING — Abnormal battery parameter detected.")
 
     else:
-        st.error(
-            "Critical battery condition detected. "
-            "Immediate attention is required."
-        )
+        st.error("CRITICAL — Multiple or severe abnormal conditions detected.")
+
+    st.metric("Selected Scenario", scenario)
+    st.metric("Detected Faults", len(alerts))
 
 
 st.divider()
 
 
 # ==========================================
-# PERFORMANCE GRAPH
+# SEPARATE PERFORMANCE GRAPHS
 # ==========================================
 
-st.subheader("📈 Battery Performance Analysis")
+st.subheader("📈 BATTERY PERFORMANCE ANALYSIS")
 
 st.caption(
-    "Illustrative parameter trends across simulation steps"
+    "Simulated parameter variations across 30 simulation steps"
 )
 
 time = np.arange(1, 31)
@@ -319,46 +389,147 @@ voltage_data = voltage + np.sin(time / 3) * 0.7
 current_data = current + np.cos(time / 4) * 1.0
 temperature_data = temperature + np.sin(time / 5) * 2
 
-chart_data = pd.DataFrame({
-    "Voltage (V)": voltage_data,
-    "Current (A)": current_data,
-    "Temperature (°C)": temperature_data
-})
 
-st.line_chart(
-    chart_data,
-    x_label="Simulation Step",
-    y_label="Parameter Value"
+# VOLTAGE GRAPH
+
+st.markdown("### ⚡ Voltage Variation")
+
+voltage_fig = go.Figure()
+
+voltage_fig.add_trace(
+    go.Scatter(
+        x=time,
+        y=voltage_data,
+        mode="lines",
+        name="Voltage",
+        line={
+            "color": "#36A2EB",
+            "width": 3
+        },
+        fill="tozeroy",
+        fillcolor="rgba(54,162,235,0.10)"
+    )
 )
+
+voltage_fig.update_layout(
+    height=280,
+    paper_bgcolor="#111E2D",
+    plot_bgcolor="#111E2D",
+    font={"color": "#D8E6F2"},
+    xaxis_title="Simulation Step",
+    yaxis_title="Voltage (V)",
+    margin=dict(l=20, r=20, t=20, b=20),
+    hovermode="x unified"
+)
+
+st.plotly_chart(
+    voltage_fig,
+    use_container_width=True,
+    config={"displayModeBar": False}
+)
+
+
+# CURRENT GRAPH
+
+st.markdown("### ⚡ Current Variation")
+
+current_fig = go.Figure()
+
+current_fig.add_trace(
+    go.Scatter(
+        x=time,
+        y=current_data,
+        mode="lines",
+        name="Current",
+        line={
+            "color": "#24D6A0",
+            "width": 3
+        },
+        fill="tozeroy",
+        fillcolor="rgba(36,214,160,0.10)"
+    )
+)
+
+current_fig.update_layout(
+    height=280,
+    paper_bgcolor="#111E2D",
+    plot_bgcolor="#111E2D",
+    font={"color": "#D8E6F2"},
+    xaxis_title="Simulation Step",
+    yaxis_title="Current (A)",
+    margin=dict(l=20, r=20, t=20, b=20),
+    hovermode="x unified"
+)
+
+st.plotly_chart(
+    current_fig,
+    use_container_width=True,
+    config={"displayModeBar": False}
+)
+
+
+# TEMPERATURE GRAPH
+
+st.markdown("### 🌡️ Temperature Variation")
+
+temperature_fig = go.Figure()
+
+temperature_fig.add_trace(
+    go.Scatter(
+        x=time,
+        y=temperature_data,
+        mode="lines",
+        name="Temperature",
+        line={
+            "color": "#FFAA45",
+            "width": 3
+        },
+        fill="tozeroy",
+        fillcolor="rgba(255,170,69,0.10)"
+    )
+)
+
+temperature_fig.update_layout(
+    height=280,
+    paper_bgcolor="#111E2D",
+    plot_bgcolor="#111E2D",
+    font={"color": "#D8E6F2"},
+    xaxis_title="Simulation Step",
+    yaxis_title="Temperature (°C)",
+    margin=dict(l=20, r=20, t=20, b=20),
+    hovermode="x unified"
+)
+
+st.plotly_chart(
+    temperature_fig,
+    use_container_width=True,
+    config={"displayModeBar": False}
+)
+
+
+st.divider()
 
 
 # ==========================================
 # SAFETY MONITORING
 # ==========================================
 
-st.divider()
+st.subheader("🛡️ BATTERY SAFETY MONITORING")
 
-st.subheader("🛡️ Battery Safety Monitoring")
+safety1, safety2 = st.columns([2, 1])
 
-s1, s2 = st.columns([2, 1])
-
-with s1:
+with safety1:
 
     if alerts:
-
         for alert in alerts:
             st.error("⚠️ " + alert)
-
     else:
-
         st.success("✓ No abnormal conditions detected.")
 
-
-with s2:
-
-    st.metric("Detected Faults", len(alerts))
+with safety2:
 
     st.metric("Safety Status", status)
+    st.metric("Total Faults", len(alerts))
 
 
 # ==========================================
@@ -367,14 +538,14 @@ with s2:
 
 st.divider()
 
-st.subheader("💻 System Information")
+st.subheader("💻 SYSTEM INFORMATION")
 
 i1, i2, i3, i4 = st.columns(4)
 
-i1.metric("Battery Type", "Li-ion")
+i1.metric("Battery Type", "Lithium-ion")
 i2.metric("Nominal Voltage", "48 V")
 i3.metric("Monitoring Mode", "Simulation")
-i4.metric("Operating Status", status)
+i4.metric("System Status", status)
 
 
 # ==========================================
@@ -384,10 +555,10 @@ i4.metric("Operating Status", status)
 st.divider()
 
 st.caption(
-    "SMART BMS | Electric Vehicle Battery Monitoring Project | Version 2.0"
+    "SMART BMS | EV Battery Monitoring & Safety System | Version 3.0"
 )
 
 st.caption(
-    "Academic software prototype. Simulation values and "
-    "thresholds are illustrative, not validated protection settings."
+    "Academic software prototype. Simulated readings and "
+    "illustrative thresholds are not validated battery protection settings."
 )
