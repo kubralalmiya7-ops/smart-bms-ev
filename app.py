@@ -94,34 +94,81 @@ st.info(
 )
 
 # -----------------------------------
-# BATTERY SIMULATION INPUTS
+# BATTERY OPERATING CONDITION SIMULATION
 # -----------------------------------
 
 st.sidebar.title("⚙️ Battery Simulation")
 
-st.sidebar.write(
-    "Adjust the values to test battery behaviour."
+st.sidebar.write("Select an operating condition.")
+
+scenario = st.sidebar.selectbox(
+    "Select Battery Condition",
+    [
+        "Normal Condition",
+        "Overvoltage",
+        "Undervoltage",
+        "Overcurrent",
+        "Overtemperature",
+        "Multiple Faults"
+    ]
 )
 
-voltage = st.sidebar.slider(
-    "Battery Voltage (V)",
-    35.0, 60.0, 48.2, 0.1
-)
+# Preset simulated battery readings
 
-current = st.sidebar.slider(
-    "Battery Current (A)",
-    0.0, 35.0, 5.4, 0.1
-)
+scenarios = {
+    "Normal Condition": {
+        "voltage": 48.2,
+        "current": 5.4,
+        "temperature": 29,
+        "soc": 82
+    },
 
-temperature = st.sidebar.slider(
-    "Battery Temperature (°C)",
-    10, 70, 29
-)
+    "Overvoltage": {
+        "voltage": 56.5,
+        "current": 5.4,
+        "temperature": 29,
+        "soc": 82
+    },
 
-soc = st.sidebar.slider(
-    "Battery State of Charge (%)",
-    0, 100, 82
-)
+    "Undervoltage": {
+        "voltage": 38.5,
+        "current": 5.4,
+        "temperature": 29,
+        "soc": 25
+    },
+
+    "Overcurrent": {
+        "voltage": 48.2,
+        "current": 27.0,
+        "temperature": 29,
+        "soc": 82
+    },
+
+    "Overtemperature": {
+        "voltage": 48.2,
+        "current": 5.4,
+        "temperature": 58,
+        "soc": 82
+    },
+
+    "Multiple Faults": {
+        "voltage": 57.0,
+        "current": 28.0,
+        "temperature": 58,
+        "soc": 18
+    }
+}
+
+# Load the selected scenario
+
+selected_data = scenarios[scenario]
+
+voltage = selected_data["voltage"]
+current = selected_data["current"]
+temperature = selected_data["temperature"]
+soc = selected_data["soc"]
+
+st.sidebar.success("Selected: " + scenario)
 
 # -----------------------------------
 # SAFETY MONITORING LOGIC
