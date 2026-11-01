@@ -210,3 +210,54 @@ info3.metric("Safety Alerts", len(alerts))
 st.caption(
     "Smart BMS Project | Software Prototype | Version 1.0"
 )
+/* Make battery readings clearly visible */
+[data-testid="stMetricValue"] {
+    color: #FFFFFF !important;
+}
+
+[data-testid="stMetricLabel"] {
+    color: #D6E2EF !important;
+}
+
+[data-testid="stMetricDelta"] {
+    color: #25C987 !important;
+}
+
+/* Improve general text visibility */
+.stMarkdown, .stText, label, p {
+    color: #EAF0F6;
+}
+/* Make battery readings clearly visible */
+[data-testid="stMetricValue"] {
+    color: #FFFFFF !important;
+}
+
+[data-testid="stMetricLabel"] {
+    color: #D6E2EF !important;
+}
+
+[data-testid="stMetricDelta"] {
+    color: #25C987 !important;
+}
+
+/* Improve general text visibility */
+.stMarkdown, .stText, label, p {
+    color: #EAF0F6;
+}
+/* Make battery readings clearly visible */
+[data-testid="stMetricValue"] {
+    color: #FFFFFF !important;
+}
+
+[data-testid="stMetricLabel"] {
+    color: #D6E2EF !important;
+}
+
+[data-testid="stMetricDelta"] {
+    color: #25C987 !important;
+}
+
+/* Improve general text visibility */
+.stMarkdown, .stText, label, p {
+    color: #EAF0F6;
+}
