@@ -17,7 +17,7 @@ st.set_page_config(
 )
 
 # =========================================================
-# 2. PROFESSIONAL DASHBOARD STYLE
+# 2. DASHBOARD STYLE
 # =========================================================
 
 st.markdown("""
@@ -75,10 +75,12 @@ MAX_PACK_VOLTAGE = N_SERIES * CELL_MAX_VOLTAGE
 DEFAULT_CAPACITY_AH = 10.0
 PACK_RESISTANCE = 0.08
 
-THERMAL_CAPACITY = 500.0
-COOLING_COEFFICIENT = 1.5
-AMBIENT_TEMPERATURE = 25.0
+# Thermal model assumptions (illustrative)
+THERMAL_CAPACITY = 500.0       # J/°C
+COOLING_COEFFICIENT = 1.5      # W/°C
+AMBIENT_TEMPERATURE = 25.0      # °C
 
+# Battery warning/critical thresholds (illustrative)
 VOLTAGE_WARNING_LOW = 42.0
 VOLTAGE_WARNING_HIGH = 53.0
 CURRENT_WARNING = 20.0
@@ -91,8 +93,13 @@ TEMPERATURE_CRITICAL = 55.0
 
 TIME_STEP = 2.0  # seconds
 
+# Simulated thermal load-control factors
+WARNING_LOAD_FACTOR = 0.50       # Reduce requested current to 50%
+CRITICAL_DISCHARGE_LIMIT = 0.0   # Simulate discharge load shutdown
+CRITICAL_CHARGE_LIMIT = 0.0      # Simulate charging shutdown
+
 # =========================================================
-# 4. SESSION STATE INITIALIZATION
+# 4. SESSION STATE
 # =========================================================
 
 defaults = {
@@ -101,13 +108,19 @@ defaults = {
     "voltage": 48.2,
     "sim_seconds": 0.0,
     "history": [],
+    "thermal_history": [],
     "fault_history": [],
     "last_faults": [],
-    "simulation_started": False,
     "capacity_ah": DEFAULT_CAPACITY_AH,
     "initial_soc": 82.0,
     "discharged_energy_wh": 0.0,
     "charged_energy_wh": 0.0,
+    "peak_temperature": 29.0,
+    "heating_rate": 0.0,
+    "cooling_power_w": 0.0,
+    "thermal_state": "NORMAL",
+    "safety_action": "None",
+    "last_effective_current": 0.0,
 }
 
 for key, value in defaults.items():
@@ -119,7 +132,7 @@ for key, value in defaults.items():
 # =========================================================
 
 def calculate_ocv(soc):
-    """Simplified illustrative 13-series cell OCV curve."""
+    """Illustrative cell OCV vs SoC curve for a 13S pack."""
 
     soc_points = np.array(
         [0, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100],
@@ -142,43 +155,39 @@ def calculate_ocv(soc):
 
 
 def calculate_soc(previous_soc, current, elapsed_seconds, capacity):
-    """Coulomb counting. Positive current = discharge."""
+    """Coulomb counting. Positive current means discharging."""
 
     if capacity <= 0:
         return float(previous_soc)
 
     consumed_ah = current * elapsed_seconds / 3600.0
 
-    new_soc = previous_soc - (
-        consumed_ah / capacity
-    ) * 100.0
+    new_soc = previous_soc - (consumed_ah / capacity) * 100.0
 
     return float(np.clip(new_soc, 0, 100))
 
 
 def calculate_terminal_voltage(soc, current):
-    """Simplified terminal voltage = OCV - I*R."""
+    """Terminal voltage approximation: OCV - I*R."""
 
     ocv = calculate_ocv(soc)
     terminal_voltage = ocv - current * PACK_RESISTANCE
 
     return float(
-        np.clip(
-            terminal_voltage,
-            0,
-            MAX_PACK_VOLTAGE + 2
-        )
+        np.clip(terminal_voltage, 0, MAX_PACK_VOLTAGE + 2)
     )
 
 
 def calculate_temperature(previous_temp, current, elapsed_seconds):
-    """Simplified thermal model with I²R heating and ambient cooling."""
+    """
+    Lumped thermal model:
+    I²R heating minus ambient cooling.
+    """
 
     heat_generation = (current ** 2) * PACK_RESISTANCE
 
-    heat_loss = (
-        COOLING_COEFFICIENT
-        * (previous_temp - AMBIENT_TEMPERATURE)
+    heat_loss = COOLING_COEFFICIENT * (
+        previous_temp - AMBIENT_TEMPERATURE
     )
 
     temperature_change = (
@@ -187,22 +196,32 @@ def calculate_temperature(previous_temp, current, elapsed_seconds):
         / THERMAL_CAPACITY
     )
 
-    return float(
-        np.clip(
-            previous_temp + temperature_change,
-            AMBIENT_TEMPERATURE,
-            100
-        )
+    new_temp = previous_temp + temperature_change
+
+    return float(np.clip(new_temp, AMBIENT_TEMPERATURE, 100.0))
+
+
+def calculate_cooling_power(temperature):
+    """Estimated heat removal to ambient in watts."""
+
+    return max(
+        0.0,
+        COOLING_COEFFICIENT
+        * (temperature - AMBIENT_TEMPERATURE)
     )
 
 
-def accumulate_energy(voltage, current, elapsed_seconds):
-    """
-    Accumulate battery energy in Wh.
+def calculate_heating_rate(previous_temp, new_temp, elapsed_seconds):
+    """Temperature rate in °C/min."""
 
-    Positive power = discharge.
-    Negative power = charge.
-    """
+    if elapsed_seconds <= 0:
+        return 0.0
+
+    return (new_temp - previous_temp) * 60.0 / elapsed_seconds
+
+
+def accumulate_energy(voltage, current, elapsed_seconds):
+    """Accumulate charge/discharge energy in Wh."""
 
     power_w = voltage * current
     energy_wh = power_w * elapsed_seconds / 3600.0
@@ -217,13 +236,73 @@ def accumulate_energy(voltage, current, elapsed_seconds):
 
 
 # =========================================================
-# 6. FAULT DETECTION
+# 6. THERMAL SAFETY AND SIMULATED LOAD REDUCTION
 # =========================================================
 
-def detect_faults(voltage, current, temperature):
+def get_thermal_state(temperature):
+    if temperature >= TEMPERATURE_CRITICAL:
+        return "CRITICAL"
+    elif temperature >= TEMPERATURE_WARNING:
+        return "WARNING"
+    return "NORMAL"
+
+
+def apply_thermal_safety(requested_current, temperature):
+    """
+    Simulated safety control:
+    Normal: requested current unchanged.
+    Warning: current reduced to 50%.
+    Critical: simulated charge/discharge current set to zero.
+
+    This is a software demonstration, not real battery protection.
+    """
+
+    thermal_state = get_thermal_state(temperature)
+
+    if thermal_state == "CRITICAL":
+
+        if requested_current > 0:
+            effective_current = CRITICAL_DISCHARGE_LIMIT
+            action = "Critical temperature: simulated discharge shutdown"
+
+        elif requested_current < 0:
+            effective_current = CRITICAL_CHARGE_LIMIT
+            action = "Critical temperature: simulated charging shutdown"
+
+        else:
+            effective_current = 0.0
+            action = "Critical temperature: load remains off"
+
+    elif thermal_state == "WARNING":
+
+        effective_current = requested_current * WARNING_LOAD_FACTOR
+
+        if requested_current > 0:
+            action = "Warning temperature: simulated discharge load reduced"
+
+        elif requested_current < 0:
+            action = "Warning temperature: simulated charging current reduced"
+
+        else:
+            action = "Warning temperature: no load requested"
+
+    else:
+
+        effective_current = requested_current
+        action = "Normal operation: no thermal load reduction"
+
+    return float(effective_current), thermal_state, action
+
+
+# =========================================================
+# 7. FAULT DETECTION
+# =========================================================
+
+def detect_faults(voltage, current, temperature, heating_rate):
 
     faults = []
 
+    # Voltage checks
     if voltage > VOLTAGE_CRITICAL_HIGH:
         faults.append({
             "parameter": "Voltage",
@@ -256,6 +335,7 @@ def detect_faults(voltage, current, temperature):
             "value": voltage
         })
 
+    # Current checks
     if abs(current) > CURRENT_CRITICAL:
         faults.append({
             "parameter": "Current",
@@ -272,6 +352,7 @@ def detect_faults(voltage, current, temperature):
             "value": current
         })
 
+    # Temperature checks
     if temperature >= TEMPERATURE_CRITICAL:
         faults.append({
             "parameter": "Temperature",
@@ -288,11 +369,20 @@ def detect_faults(voltage, current, temperature):
             "value": temperature
         })
 
+    # Rapid temperature-rise warning (illustrative)
+    if heating_rate >= 5.0:
+        faults.append({
+            "parameter": "Thermal Rate",
+            "message": "Rapid temperature rise detected",
+            "severity": "WARNING",
+            "value": heating_rate
+        })
+
     return faults
 
 
 # =========================================================
-# 7. GAUGE CREATION
+# 8. GAUGE CREATION
 # =========================================================
 
 def create_gauge(
@@ -358,7 +448,7 @@ def create_gauge(
 
 
 # =========================================================
-# 8. LINE CHART CREATION
+# 9. LINE CHART
 # =========================================================
 
 def create_line_chart(
@@ -395,7 +485,7 @@ def create_line_chart(
 
 
 # =========================================================
-# 9. HEADER
+# 10. HEADER
 # =========================================================
 
 st.markdown("""
@@ -403,17 +493,17 @@ st.markdown("""
 SMART EV BATTERY MANAGEMENT SYSTEM
 </h1>
 <p style="text-align:center;color:#94A3B8;">
-Intelligent Monitoring | Battery Analytics | Fault Detection
+Intelligent Monitoring | Battery Analytics | Thermal Safety
 </p>
 """, unsafe_allow_html=True)
 
 st.info(
-    "VERSION 4.1 | Simulation prototype. "
-    "No physical battery or Arduino is connected yet."
+    "VERSION 4.2 | Thermal Management & Safety Prototype | "
+    "Simulated data only. No physical battery or Arduino is connected."
 )
 
 # =========================================================
-# 10. SIDEBAR CONTROLS
+# 11. SIDEBAR CONTROL PANEL
 # =========================================================
 
 st.sidebar.title("BATTERY CONTROL PANEL")
@@ -437,26 +527,35 @@ if st.sidebar.button("Reset Battery Simulation", use_container_width=True):
 
     st.session_state.soc = st.session_state.initial_soc
     st.session_state.temperature = 29.0
+    st.session_state.peak_temperature = 29.0
     st.session_state.voltage = calculate_terminal_voltage(
         st.session_state.soc, 0
     )
     st.session_state.sim_seconds = 0.0
     st.session_state.history = []
+    st.session_state.thermal_history = []
     st.session_state.fault_history = []
     st.session_state.last_faults = []
     st.session_state.discharged_energy_wh = 0.0
     st.session_state.charged_energy_wh = 0.0
+    st.session_state.heating_rate = 0.0
+    st.session_state.cooling_power_w = 0.0
+    st.session_state.thermal_state = "NORMAL"
+    st.session_state.safety_action = "None"
+    st.session_state.last_effective_current = 0.0
 
     st.rerun()
 
 st.sidebar.divider()
 
 # =========================================================
-# 11. AUTOMATIC OR MANUAL OPERATION
+# 12. AUTOMATIC SIMULATION OR MANUAL TESTING
 # =========================================================
 
 automatic_run = False
-operating_current = 0.0
+requested_current = 0.0
+effective_current = 0.0
+manual_advance = False
 
 if mode == "Automatic Simulation":
 
@@ -478,16 +577,22 @@ if mode == "Automatic Simulation":
     )
 
     if operation == "Idle":
-        operating_current = 0.0
+        requested_current = 0.0
 
     elif operation == "Driving - Low Load":
-        operating_current = 5.0
+        requested_current = 5.0
 
     elif operation == "Driving - High Load":
-        operating_current = 15.0
+        requested_current = 15.0
 
     else:
-        operating_current = -5.0
+        requested_current = -5.0
+
+    # Apply safety action using the current battery temperature.
+    effective_current, thermal_state, safety_action = apply_thermal_safety(
+        requested_current,
+        st.session_state.temperature
+    )
 
     if automatic_run:
 
@@ -497,41 +602,90 @@ if mode == "Automatic Simulation":
             key="battery_auto_refresh"
         )
 
-        # Update battery simulation every refresh.
+        previous_temp = st.session_state.temperature
+        previous_soc = st.session_state.soc
+
+        # Update SoC using the safety-adjusted current.
         st.session_state.soc = calculate_soc(
-            st.session_state.soc,
-            operating_current,
+            previous_soc,
+            effective_current,
             TIME_STEP,
             capacity
         )
 
+        # Update temperature using the effective current.
         st.session_state.temperature = calculate_temperature(
-            st.session_state.temperature,
-            operating_current,
+            previous_temp,
+            effective_current,
             TIME_STEP
+        )
+
+        st.session_state.heating_rate = calculate_heating_rate(
+            previous_temp,
+            st.session_state.temperature,
+            TIME_STEP
+        )
+
+        st.session_state.peak_temperature = max(
+            st.session_state.peak_temperature,
+            st.session_state.temperature
+        )
+
+        st.session_state.cooling_power_w = calculate_cooling_power(
+            st.session_state.temperature
         )
 
         st.session_state.voltage = calculate_terminal_voltage(
             st.session_state.soc,
-            operating_current
+            effective_current
         )
 
-        # Calculate and accumulate energy.
+        # Track energy using safety-adjusted current.
         accumulate_energy(
             st.session_state.voltage,
-            operating_current,
+            effective_current,
             TIME_STEP
         )
 
         st.session_state.sim_seconds += TIME_STEP
 
+        st.session_state.thermal_state = get_thermal_state(
+            st.session_state.temperature
+        )
+
+        st.session_state.safety_action = safety_action
+        st.session_state.last_effective_current = effective_current
+
+        # Save history on each simulation step.
+        st.session_state.history.append({
+            "Time (s)": st.session_state.sim_seconds,
+            "Voltage (V)": st.session_state.voltage,
+            "Requested Current (A)": requested_current,
+            "Current (A)": effective_current,
+            "Temperature (°C)": st.session_state.temperature,
+            "SoC (%)": st.session_state.soc,
+            "Power (W)": st.session_state.voltage * effective_current,
+            "Heating Rate (°C/min)": st.session_state.heating_rate,
+            "Cooling Power (W)": st.session_state.cooling_power_w,
+            "Thermal State": st.session_state.thermal_state
+        })
+
+        st.session_state.thermal_history.append({
+            "Time (s)": st.session_state.sim_seconds,
+            "Temperature (°C)": st.session_state.temperature,
+            "Heating Rate (°C/min)": st.session_state.heating_rate,
+            "Cooling Power (W)": st.session_state.cooling_power_w,
+            "Thermal State": st.session_state.thermal_state
+        })
+
     voltage = st.session_state.voltage
-    current = operating_current
+    current = effective_current
     temperature = st.session_state.temperature
     soc = st.session_state.soc
 
     st.sidebar.caption(
-        "Automatic mode advances the simulated battery every 2 seconds."
+        "Automatic simulation updates every 2 seconds. "
+        "Thermal safety may reduce simulated current."
     )
 
 else:
@@ -547,7 +701,7 @@ else:
     )
 
     manual_current = st.sidebar.slider(
-        "Battery Current (A)",
+        "Requested Battery Current (A)",
         min_value=-30.0,
         max_value=35.0,
         value=5.0,
@@ -563,51 +717,101 @@ else:
         step=1.0
     )
 
+    # Safety response is evaluated at the manually selected temperature.
+    effective_current, thermal_state, safety_action = apply_thermal_safety(
+        manual_current,
+        manual_temperature
+    )
+
     voltage = manual_voltage
-    current = manual_current
+    current = effective_current
     temperature = manual_temperature
     soc = st.session_state.soc
 
     st.sidebar.caption(
-        "Manual mode changes the readings for fault testing."
+        "Manual values are used for fault testing. "
+        "The safety logic can modify the requested current."
     )
 
-    advance_manual = st.sidebar.button(
+    manual_advance = st.sidebar.button(
         "Advance Manual Simulation by 10 Seconds"
     )
 
-    if advance_manual:
+    if manual_advance:
+
+        previous_temp = st.session_state.temperature
+        previous_soc = st.session_state.soc
 
         st.session_state.soc = calculate_soc(
-            st.session_state.soc,
-            current,
+            previous_soc,
+            effective_current,
             10.0,
             capacity
         )
 
-        st.session_state.temperature = temperature
-        st.session_state.voltage = voltage
+        st.session_state.temperature = manual_temperature
 
-        accumulate_energy(voltage, current, 10.0)
+        st.session_state.heating_rate = calculate_heating_rate(
+            previous_temp,
+            manual_temperature,
+            10.0
+        )
+
+        st.session_state.peak_temperature = max(
+            st.session_state.peak_temperature,
+            manual_temperature
+        )
+
+        st.session_state.cooling_power_w = calculate_cooling_power(
+            manual_temperature
+        )
+
+        st.session_state.voltage = manual_voltage
+
+        accumulate_energy(
+            manual_voltage,
+            effective_current,
+            10.0
+        )
 
         st.session_state.sim_seconds += 10.0
 
-        # Save the advanced manual reading.
+        st.session_state.thermal_state = get_thermal_state(
+            manual_temperature
+        )
+
+        st.session_state.safety_action = safety_action
+        st.session_state.last_effective_current = effective_current
+
         st.session_state.history.append({
             "Time (s)": st.session_state.sim_seconds,
-            "Voltage (V)": voltage,
-            "Current (A)": current,
-            "Temperature (°C)": temperature,
-            "SoC (%)": st.session_state.soc
+            "Voltage (V)": manual_voltage,
+            "Requested Current (A)": manual_current,
+            "Current (A)": effective_current,
+            "Temperature (°C)": manual_temperature,
+            "SoC (%)": st.session_state.soc,
+            "Power (W)": manual_voltage * effective_current,
+            "Heating Rate (°C/min)": st.session_state.heating_rate,
+            "Cooling Power (W)": st.session_state.cooling_power_w,
+            "Thermal State": st.session_state.thermal_state
+        })
+
+        st.session_state.thermal_history.append({
+            "Time (s)": st.session_state.sim_seconds,
+            "Temperature (°C)": manual_temperature,
+            "Heating Rate (°C/min)": st.session_state.heating_rate,
+            "Cooling Power (W)": st.session_state.cooling_power_w,
+            "Thermal State": st.session_state.thermal_state
         })
 
         st.rerun()
 
 # =========================================================
-# 12. BATTERY CALCULATIONS
+# 13. BATTERY CALCULATIONS
 # =========================================================
 
 soc = st.session_state.soc
+
 remaining_ah = capacity * soc / 100.0
 consumed_ah = capacity - remaining_ah
 
@@ -623,11 +827,18 @@ elif current < 0:
 else:
     operating_status = "IDLE"
 
+thermal_state = get_thermal_state(temperature)
+
 # =========================================================
-# 13. FAULT STATUS AND EVENT HISTORY
+# 14. FAULT STATUS AND HISTORY
 # =========================================================
 
-faults = detect_faults(voltage, current, temperature)
+faults = detect_faults(
+    voltage,
+    current,
+    temperature,
+    st.session_state.heating_rate
+)
 
 for fault in faults:
 
@@ -662,40 +873,9 @@ else:
     system_status = "NORMAL"
     system_color = "#22C55E"
 
-# =========================================================
-# 14. SAVE PERFORMANCE HISTORY
-# =========================================================
-
-if mode == "Automatic Simulation" and automatic_run:
-
-    if (
-        not st.session_state.history
-        or st.session_state.history[-1]["Time (s)"]
-        != st.session_state.sim_seconds
-    ):
-
-        st.session_state.history.append({
-            "Time (s)": st.session_state.sim_seconds,
-            "Voltage (V)": voltage,
-            "Current (A)": current,
-            "Temperature (°C)": temperature,
-            "SoC (%)": soc
-        })
-
-elif mode == "Manual Fault Testing":
-
-    if st.button("Record Manual Reading"):
-
-        st.session_state.history.append({
-            "Time (s)": st.session_state.sim_seconds,
-            "Voltage (V)": voltage,
-            "Current (A)": current,
-            "Temperature (°C)": temperature,
-            "SoC (%)": soc
-        })
-
-# Limit histories to avoid unbounded growth.
+# Keep histories within limits.
 st.session_state.history = st.session_state.history[-150:]
+st.session_state.thermal_history = st.session_state.thermal_history[-150:]
 st.session_state.fault_history = st.session_state.fault_history[-100:]
 
 # =========================================================
@@ -727,7 +907,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# Display fault alerts.
 if faults:
 
     st.markdown("### ACTIVE BATTERY ALERTS")
@@ -736,20 +915,56 @@ if faults:
 
         if fault["severity"] == "CRITICAL":
             st.error(
-                f"🔴 {fault['message']} | "
-                f"{fault['value']:.2f}"
+                f"🔴 {fault['message']} | {fault['value']:.2f}"
             )
         else:
             st.warning(
-                f"🟠 {fault['message']} | "
-                f"{fault['value']:.2f}"
+                f"🟠 {fault['message']} | {fault['value']:.2f}"
             )
 
 else:
     st.success("No active battery faults detected.")
 
 # =========================================================
-# 16. BATTERY GAUGES
+# 16. THERMAL SAFETY STATUS
+# =========================================================
+
+st.markdown("### THERMAL MANAGEMENT & SAFETY")
+
+if thermal_state == "CRITICAL":
+    thermal_color = "#EF4444"
+    st.error("CRITICAL THERMAL STATE")
+
+elif thermal_state == "WARNING":
+    thermal_color = "#F59E0B"
+    st.warning("THERMAL WARNING")
+
+else:
+    thermal_color = "#22C55E"
+    st.success("THERMAL CONDITION NORMAL")
+
+st.markdown(
+    f"""
+    <div style="
+        background:#172235;
+        border:1px solid {thermal_color};
+        border-left:6px solid {thermal_color};
+        padding:16px;
+        border-radius:12px;
+    ">
+        <h3 style="color:{thermal_color};margin:0;">
+            Thermal State: {thermal_state}
+        </h3>
+        <p style="margin:6px 0;">
+            Safety Action: {safety_action}
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# =========================================================
+# 17. BATTERY GAUGES
 # =========================================================
 
 st.markdown("### LIVE BATTERY PARAMETERS")
@@ -813,8 +1028,9 @@ with g3:
 st.divider()
 
 # =========================================================
-# 17. STATE OF CHARGE AND CAPACITY
+# 18. BATTERY CAPACITY AND SOC
 # =========================================================
+
 st.markdown("### BATTERY CAPACITY ANALYSIS")
 
 c1, c2 = st.columns([1, 2])
@@ -825,9 +1041,7 @@ with c1:
         go.Pie(
             values=[soc, 100 - soc],
             hole=0.75,
-            marker={
-                "colors": ["#22C55E", "#263449"]
-            },
+            marker={"colors": ["#22C55E", "#263449"]},
             textinfo="none"
         )
     )
@@ -843,6 +1057,7 @@ with c1:
             "font": {"size": 25, "color": "white"}
         }]
     )
+
     st.plotly_chart(
         soc_fig,
         use_container_width=True,
@@ -861,8 +1076,9 @@ with c2:
     st.caption(
         f"Nominal energy reference: {nominal_energy_wh:.1f} Wh"
     )
+
 # =========================================================
-# 18. POWER AND ENERGY ANALYSIS
+# 19. POWER AND ENERGY ANALYSIS
 # =========================================================
 
 st.markdown("### ELECTRICAL POWER AND ENERGY ANALYSIS")
@@ -872,7 +1088,7 @@ p1, p2, p3 = st.columns(3)
 p1.metric(
     "Instantaneous Power",
     f"{power_w:.2f} W",
-    help="Positive = discharging; negative = charging."
+    help="Positive = discharge; negative = charging."
 )
 
 p2.metric(
@@ -886,12 +1102,46 @@ p3.metric(
 )
 
 st.caption(
-    "Energy totals accumulate during simulation steps. "
-    "Manual mode accumulates energy when you advance the simulation."
+    "Energy counters accumulate during automatic simulation "
+    "and manual advance steps."
 )
 
 # =========================================================
-# 19. PERFORMANCE GRAPHS
+# 20. ADVANCED THERMAL ANALYSIS
+# =========================================================
+
+st.markdown("### ADVANCED THERMAL ANALYSIS")
+
+t1, t2, t3, t4 = st.columns(4)
+
+t1.metric(
+    "Current Temperature",
+    f"{temperature:.2f} °C"
+)
+
+t2.metric(
+    "Peak Temperature",
+    f"{st.session_state.peak_temperature:.2f} °C"
+)
+
+t3.metric(
+    "Heating / Cooling Rate",
+    f"{st.session_state.heating_rate:.2f} °C/min"
+)
+
+t4.metric(
+    "Estimated Cooling Power",
+    f"{st.session_state.cooling_power_w:.2f} W"
+)
+
+st.caption(
+    "Positive heating rate indicates temperature rise. "
+    "Negative rate indicates cooling. Cooling power is a simplified "
+    "estimate of heat dissipation to ambient."
+)
+
+# =========================================================
+# 21. PERFORMANCE GRAPHS
 # =========================================================
 
 st.markdown("### BATTERY PERFORMANCE GRAPHS")
@@ -900,12 +1150,7 @@ if st.session_state.history:
 
     df = pd.DataFrame(st.session_state.history)
 
-    # Calculate power from recorded voltage and current.
-    df["Power (W)"] = (
-        df["Voltage (V)"] * df["Current (A)"]
-    )
-
-    # Voltage graph.
+    # Voltage graph
     st.plotly_chart(
         create_line_chart(
             df,
@@ -919,7 +1164,7 @@ if st.session_state.history:
         config={"displayModeBar": False}
     )
 
-    # Current graph.
+    # Current graph
     st.plotly_chart(
         create_line_chart(
             df,
@@ -933,7 +1178,7 @@ if st.session_state.history:
         config={"displayModeBar": False}
     )
 
-    # Temperature graph.
+    # Temperature graph
     st.plotly_chart(
         create_line_chart(
             df,
@@ -947,7 +1192,7 @@ if st.session_state.history:
         config={"displayModeBar": False}
     )
 
-    # Power graph.
+    # Power graph
     st.plotly_chart(
         create_line_chart(
             df,
@@ -964,12 +1209,76 @@ if st.session_state.history:
 else:
 
     st.info(
-        "Start automatic simulation or record/advance manual readings "
+        "Start automatic simulation or advance manual simulation "
         "to generate performance graphs."
     )
 
 # =========================================================
-# 20. FAULT HISTORY
+# 22. THERMAL HISTORY GRAPH
+# =========================================================
+
+st.markdown("### THERMAL HISTORY AND COOLING")
+
+if st.session_state.thermal_history:
+
+    thermal_df = pd.DataFrame(st.session_state.thermal_history)
+
+    # Temperature trend
+    st.plotly_chart(
+        create_line_chart(
+            thermal_df,
+            "Time (s)",
+            "Temperature (°C)",
+            "Thermal Behaviour vs Time",
+            "Temperature (°C)",
+            "#FB7185"
+        ),
+        use_container_width=True,
+        config={"displayModeBar": False}
+    )
+
+    # Heating/cooling rate
+    st.plotly_chart(
+        create_line_chart(
+            thermal_df,
+            "Time (s)",
+            "Heating Rate (°C/min)",
+            "Heating and Cooling Rate vs Time",
+            "Rate (°C/min)",
+            "#A78BFA"
+        ),
+        use_container_width=True,
+        config={"displayModeBar": False}
+    )
+
+    # Cooling power
+    st.plotly_chart(
+        create_line_chart(
+            thermal_df,
+            "Time (s)",
+            "Cooling Power (W)",
+            "Estimated Heat Dissipation vs Time",
+            "Cooling Power (W)",
+            "#06B6D4"
+        ),
+        use_container_width=True,
+        config={"displayModeBar": False}
+    )
+
+    st.dataframe(
+        thermal_df.tail(10),
+        use_container_width=True,
+        hide_index=True
+    )
+
+else:
+
+    st.info(
+        "Thermal history will appear as the simulation advances."
+    )
+
+# =========================================================
+# 23. FAULT EVENT HISTORY
 # =========================================================
 
 st.markdown("### FAULT EVENT HISTORY")
@@ -998,17 +1307,14 @@ else:
     st.info("No fault events have been recorded.")
 
 # =========================================================
-# 21. PERFORMANCE DATA EXPORT
+# 24. PERFORMANCE DATA EXPORT
 # =========================================================
-st.markdown("### PERFORMANCE DATA")
+
+st.markdown("### PERFORMANCE DATA EXPORT")
 
 if st.session_state.history:
 
     export_df = pd.DataFrame(st.session_state.history)
-
-    export_df["Power (W)"] = (
-        export_df["Voltage (V)"] * export_df["Current (A)"]
-    )
 
     st.dataframe(
         export_df.tail(10),
@@ -1030,7 +1336,7 @@ else:
     st.info("Performance readings will appear here once recorded.")
 
 # =========================================================
-# 22. SYSTEM INFORMATION
+# 25. SYSTEM INFORMATION
 # =========================================================
 
 st.markdown("### SYSTEM INFORMATION")
@@ -1042,43 +1348,46 @@ s2.metric("Nominal Pack Voltage", f"{NOMINAL_VOLTAGE:.1f} V")
 s3.metric("Simulation Time", f"{st.session_state.sim_seconds:.0f} s")
 
 st.markdown("""
-**Battery Model:** Lithium-ion battery pack (illustrative model)
+**Battery Model:** Illustrative lithium-ion pack
 
-**Configuration:** 13 series × 4 parallel cells (13S4P)
+**Configuration:** 13S4P
 
 **Nominal Cell Voltage:** 3.6 V
 
 **Cell Voltage Range:** 3.0–4.2 V
 
-**Pack Nominal Voltage:** 46.8 V
+**Nominal Pack Voltage:** 46.8 V
 
-**Rated Capacity:** User-configurable (default 10 Ah)
-
-**Simulation Time Step:** 2 seconds (automatic) / 10 seconds (manual advance)
+**Rated Capacity:** User configurable (default 10 Ah)
 
 **SoC Estimation:** Coulomb Counting
 
 **Voltage Model:** Simplified OCV and internal resistance
 
-**Thermal Model:** Simplified I²R heat generation and ambient cooling
+**Thermal Model:** I²R heating and ambient cooling
+
+**Thermal Safety:** Normal, warning and critical states
+
+**Simulated Safety Action:** Load reduction during warning and load shutdown at critical temperature
 
 **SoH:** Not calculated; requires measured capacity test data
 
-**Data Source:** Mathematical simulation / manual test inputs
+**Data Source:** Mathematical simulation and manual test inputs
 
-**Hardware Status:** Not yet connected
+**Hardware Status:** Not connected
 
-**Note:** This dashboard is a development prototype. Model parameters and warning thresholds are illustrative and must be validated against the selected cell manufacturer's specifications before any physical battery testing.
+**Safety Disclaimer:** This is a software simulation prototype. Model parameters and thresholds are illustrative, not validated protection settings. The simulated load reduction does not physically disconnect a battery. Do not use this software as a real battery safety controller.
 """)
 
 # =========================================================
-# 23. FOOTER
+# 26. FOOTER
 # =========================================================
+
 st.divider()
 
 st.markdown("""
 <p style="text-align:center;color:#64748B;">
-Smart EV Battery Management System | Version 4.1 |
-Battery Performance and Energy Analysis
+Smart EV Battery Management System | Version 4.2 |
+Advanced Thermal Management & Battery Safety
 </p>
 """, unsafe_allow_html=True)
