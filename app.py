@@ -73,17 +73,12 @@ MIN_PACK_VOLTAGE = N_SERIES * CELL_MIN_VOLTAGE
 MAX_PACK_VOLTAGE = N_SERIES * CELL_MAX_VOLTAGE
 
 DEFAULT_CAPACITY_AH = 10.0
-
-# Illustrative pack-level internal resistance.
-# Replace with a measured or datasheet value when available.
 PACK_RESISTANCE = 0.08
 
-# Simulation thermal model parameters.
 THERMAL_CAPACITY = 500.0
 COOLING_COEFFICIENT = 1.5
 AMBIENT_TEMPERATURE = 25.0
 
-# Demonstration protection thresholds.
 VOLTAGE_WARNING_LOW = 42.0
 VOLTAGE_WARNING_HIGH = 53.0
 CURRENT_WARNING = 20.0
@@ -110,7 +105,9 @@ defaults = {
     "last_faults": [],
     "simulation_started": False,
     "capacity_ah": DEFAULT_CAPACITY_AH,
-    "initial_soc": 82.0
+    "initial_soc": 82.0,
+    "discharged_energy_wh": 0.0,
+    "charged_energy_wh": 0.0,
 }
 
 for key, value in defaults.items():
@@ -122,13 +119,7 @@ for key, value in defaults.items():
 # =========================================================
 
 def calculate_ocv(soc):
-    """
-    Simplified illustrative 13S lithium-ion
-    open-circuit voltage curve.
-
-    This is not a substitute for a cell manufacturer's
-    voltage-versus-SoC discharge curve.
-    """
+    """Simplified illustrative 13-series cell OCV curve."""
 
     soc_points = np.array(
         [0, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100],
@@ -147,19 +138,14 @@ def calculate_ocv(soc):
         cell_voltage_points
     )
 
-    return cell_ocv * N_SERIES
+    return float(cell_ocv * N_SERIES)
 
 
 def calculate_soc(previous_soc, current, elapsed_seconds, capacity):
-    """
-    Coulomb counting.
-
-    Positive current = discharging.
-    Negative current = charging.
-    """
+    """Coulomb counting. Positive current = discharge."""
 
     if capacity <= 0:
-        return previous_soc
+        return float(previous_soc)
 
     consumed_ah = current * elapsed_seconds / 3600.0
 
@@ -171,18 +157,10 @@ def calculate_soc(previous_soc, current, elapsed_seconds, capacity):
 
 
 def calculate_terminal_voltage(soc, current):
-    """
-    Simplified terminal voltage model:
-    Terminal voltage = OCV - I*R
-
-    Positive current means discharge.
-    """
+    """Simplified terminal voltage = OCV - I*R."""
 
     ocv = calculate_ocv(soc)
-
-    terminal_voltage = (
-        ocv - current * PACK_RESISTANCE
-    )
+    terminal_voltage = ocv - current * PACK_RESISTANCE
 
     return float(
         np.clip(
@@ -194,15 +172,9 @@ def calculate_terminal_voltage(soc, current):
 
 
 def calculate_temperature(previous_temp, current, elapsed_seconds):
-    """
-    Simplified thermal model:
-    Heat generation = I^2 * R
-    Cooling depends on difference from ambient temperature.
-    """
+    """Simplified thermal model with I²R heating and ambient cooling."""
 
-    heat_generation = (
-        current ** 2
-    ) * PACK_RESISTANCE
+    heat_generation = (current ** 2) * PACK_RESISTANCE
 
     heat_loss = (
         COOLING_COEFFICIENT
@@ -222,6 +194,26 @@ def calculate_temperature(previous_temp, current, elapsed_seconds):
             100
         )
     )
+
+
+def accumulate_energy(voltage, current, elapsed_seconds):
+    """
+    Accumulate battery energy in Wh.
+
+    Positive power = discharge.
+    Negative power = charge.
+    """
+
+    power_w = voltage * current
+    energy_wh = power_w * elapsed_seconds / 3600.0
+
+    if power_w > 0:
+        st.session_state.discharged_energy_wh += energy_wh
+
+    elif power_w < 0:
+        st.session_state.charged_energy_wh += abs(energy_wh)
+
+    return power_w
 
 
 # =========================================================
@@ -303,9 +295,11 @@ def detect_faults(voltage, current, temperature):
 # 7. GAUGE CREATION
 # =========================================================
 
-def create_gauge(title, value, unit, minimum, maximum,
-                 warning_low=None, warning_high=None,
-                 critical_low=None, critical_high=None):
+def create_gauge(
+    title, value, unit, minimum, maximum,
+    warning_low=None, warning_high=None,
+    critical_low=None, critical_high=None
+):
 
     warning_low = minimum if warning_low is None else warning_low
     warning_high = maximum if warning_high is None else warning_high
@@ -319,9 +313,7 @@ def create_gauge(title, value, unit, minimum, maximum,
     else:
         color = "#22C55E"
 
-    display_value = float(
-        np.clip(value, minimum, maximum)
-    )
+    display_value = float(np.clip(value, minimum, maximum))
 
     fig = go.Figure(
         go.Indicator(
@@ -366,7 +358,44 @@ def create_gauge(title, value, unit, minimum, maximum,
 
 
 # =========================================================
-# 8. HEADER
+# 8. LINE CHART CREATION
+# =========================================================
+
+def create_line_chart(
+    df, x_column, y_column, title, y_label, line_color
+):
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=df[x_column],
+            y=df[y_column],
+            mode="lines+markers",
+            line=dict(color=line_color, width=2),
+            marker=dict(size=4),
+            name=y_label
+        )
+    )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Simulation Time (s)",
+        yaxis_title=y_label,
+        height=350,
+        paper_bgcolor="#111827",
+        plot_bgcolor="#172235",
+        font=dict(color="#E5E7EB"),
+        xaxis=dict(gridcolor="#29384D"),
+        yaxis=dict(gridcolor="#29384D"),
+        margin=dict(l=30, r=20, t=55, b=40)
+    )
+
+    return fig
+
+
+# =========================================================
+# 9. HEADER
 # =========================================================
 
 st.markdown("""
@@ -379,12 +408,12 @@ Intelligent Monitoring | Battery Analytics | Fault Detection
 """, unsafe_allow_html=True)
 
 st.info(
-    "VERSION 4.0 | Simulation prototype. "
+    "VERSION 4.1 | Simulation prototype. "
     "No physical battery or Arduino is connected yet."
 )
 
 # =========================================================
-# 9. SIDEBAR CONTROLS
+# 10. SIDEBAR CONTROLS
 # =========================================================
 
 st.sidebar.title("BATTERY CONTROL PANEL")
@@ -402,10 +431,10 @@ capacity = st.sidebar.number_input(
     step=1.0
 )
 
-if capacity != st.session_state.capacity_ah:
-    st.session_state.capacity_ah = capacity
+st.session_state.capacity_ah = capacity
 
 if st.sidebar.button("Reset Battery Simulation", use_container_width=True):
+
     st.session_state.soc = st.session_state.initial_soc
     st.session_state.temperature = 29.0
     st.session_state.voltage = calculate_terminal_voltage(
@@ -415,13 +444,19 @@ if st.sidebar.button("Reset Battery Simulation", use_container_width=True):
     st.session_state.history = []
     st.session_state.fault_history = []
     st.session_state.last_faults = []
+    st.session_state.discharged_energy_wh = 0.0
+    st.session_state.charged_energy_wh = 0.0
+
     st.rerun()
 
 st.sidebar.divider()
 
 # =========================================================
-# 10. AUTOMATIC OR MANUAL OPERATION
+# 11. AUTOMATIC OR MANUAL OPERATION
 # =========================================================
+
+automatic_run = False
+operating_current = 0.0
 
 if mode == "Automatic Simulation":
 
@@ -455,13 +490,14 @@ if mode == "Automatic Simulation":
         operating_current = -5.0
 
     if automatic_run:
+
         st_autorefresh(
             interval=2000,
             limit=None,
             key="battery_auto_refresh"
         )
 
-    if automatic_run:
+        # Update battery simulation every refresh.
         st.session_state.soc = calculate_soc(
             st.session_state.soc,
             operating_current,
@@ -478,6 +514,13 @@ if mode == "Automatic Simulation":
         st.session_state.voltage = calculate_terminal_voltage(
             st.session_state.soc,
             operating_current
+        )
+
+        # Calculate and accumulate energy.
+        accumulate_energy(
+            st.session_state.voltage,
+            operating_current,
+            TIME_STEP
         )
 
         st.session_state.sim_seconds += TIME_STEP
@@ -499,9 +542,7 @@ else:
         "Battery Voltage (V)",
         min_value=0.0,
         max_value=60.0,
-        value=float(
-            np.clip(st.session_state.voltage, 0, 60)
-        ),
+        value=float(np.clip(st.session_state.voltage, 0, 60)),
         step=0.5
     )
 
@@ -518,30 +559,24 @@ else:
         "Battery Temperature (°C)",
         min_value=0.0,
         max_value=80.0,
-        value=float(
-            np.clip(st.session_state.temperature, 0, 80)
-        ),
+        value=float(np.clip(st.session_state.temperature, 0, 80)),
         step=1.0
     )
 
     voltage = manual_voltage
     current = manual_current
     temperature = manual_temperature
-
     soc = st.session_state.soc
 
     st.sidebar.caption(
-        "Manual mode changes the displayed sensor readings "
-        "for fault testing. It does not represent a physical battery."
+        "Manual mode changes the readings for fault testing."
     )
 
-# =========================================================
-# 11. UPDATE SOC IN MANUAL MODE
-# =========================================================
+    advance_manual = st.sidebar.button(
+        "Advance Manual Simulation by 10 Seconds"
+    )
 
-if mode == "Manual Fault Testing":
-
-    if st.button("Advance Manual Simulation by 10 Seconds"):
+    if advance_manual:
 
         st.session_state.soc = calculate_soc(
             st.session_state.soc,
@@ -550,10 +585,21 @@ if mode == "Manual Fault Testing":
             capacity
         )
 
-        st.session_state.sim_seconds += 10.0
-
         st.session_state.temperature = temperature
         st.session_state.voltage = voltage
+
+        accumulate_energy(voltage, current, 10.0)
+
+        st.session_state.sim_seconds += 10.0
+
+        # Save the advanced manual reading.
+        st.session_state.history.append({
+            "Time (s)": st.session_state.sim_seconds,
+            "Voltage (V)": voltage,
+            "Current (A)": current,
+            "Temperature (°C)": temperature,
+            "SoC (%)": st.session_state.soc
+        })
 
         st.rerun()
 
@@ -561,11 +607,14 @@ if mode == "Manual Fault Testing":
 # 12. BATTERY CALCULATIONS
 # =========================================================
 
+soc = st.session_state.soc
 remaining_ah = capacity * soc / 100.0
 consumed_ah = capacity - remaining_ah
 
 nominal_energy_wh = NOMINAL_VOLTAGE * capacity
 remaining_energy_wh = nominal_energy_wh * soc / 100.0
+
+power_w = voltage * current
 
 if current > 0:
     operating_status = "DISCHARGING"
@@ -578,17 +627,10 @@ else:
 # 13. FAULT STATUS AND EVENT HISTORY
 # =========================================================
 
-faults = detect_faults(
-    voltage,
-    current,
-    temperature
-)
-
-fault_names = [
-    f["message"] for f in faults
-]
+faults = detect_faults(voltage, current, temperature)
 
 for fault in faults:
+
     event_key = (
         fault["parameter"],
         fault["message"]
@@ -631,6 +673,7 @@ if mode == "Automatic Simulation" and automatic_run:
         or st.session_state.history[-1]["Time (s)"]
         != st.session_state.sim_seconds
     ):
+
         st.session_state.history.append({
             "Time (s)": st.session_state.sim_seconds,
             "Voltage (V)": voltage,
@@ -651,7 +694,7 @@ elif mode == "Manual Fault Testing":
             "SoC (%)": soc
         })
 
-# Keep only the latest 150 readings.
+# Limit histories to avoid unbounded growth.
 st.session_state.history = st.session_state.history[-150:]
 st.session_state.fault_history = st.session_state.fault_history[-100:]
 
@@ -684,6 +727,27 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# Display fault alerts.
+if faults:
+
+    st.markdown("### ACTIVE BATTERY ALERTS")
+
+    for fault in faults:
+
+        if fault["severity"] == "CRITICAL":
+            st.error(
+                f"🔴 {fault['message']} | "
+                f"{fault['value']:.2f}"
+            )
+        else:
+            st.warning(
+                f"🟠 {fault['message']} | "
+                f"{fault['value']:.2f}"
+            )
+
+else:
+    st.success("No active battery faults detected.")
+
 # =========================================================
 # 16. BATTERY GAUGES
 # =========================================================
@@ -693,6 +757,7 @@ st.markdown("### LIVE BATTERY PARAMETERS")
 g1, g2, g3 = st.columns(3)
 
 with g1:
+
     st.plotly_chart(
         create_gauge(
             "BATTERY VOLTAGE",
@@ -710,6 +775,7 @@ with g1:
     )
 
 with g2:
+
     st.plotly_chart(
         create_gauge(
             "BATTERY CURRENT",
@@ -727,6 +793,7 @@ with g2:
     )
 
 with g3:
+
     st.plotly_chart(
         create_gauge(
             "BATTERY TEMPERATURE",
@@ -748,7 +815,6 @@ st.divider()
 # =========================================================
 # 17. STATE OF CHARGE AND CAPACITY
 # =========================================================
-
 st.markdown("### BATTERY CAPACITY ANALYSIS")
 
 c1, c2 = st.columns([1, 2])
@@ -777,7 +843,6 @@ with c1:
             "font": {"size": 25, "color": "white"}
         }]
     )
-
     st.plotly_chart(
         soc_fig,
         use_container_width=True,
@@ -796,7 +861,224 @@ with c2:
     st.caption(
         f"Nominal energy reference: {nominal_energy_wh:.1f} Wh"
     )
+# =========================================================
+# 18. POWER AND ENERGY ANALYSIS
+# =========================================================
+
+st.markdown("### ELECTRICAL POWER AND ENERGY ANALYSIS")
+
+p1, p2, p3 = st.columns(3)
+
+p1.metric(
+    "Instantaneous Power",
+    f"{power_w:.2f} W",
+    help="Positive = discharging; negative = charging."
+)
+
+p2.metric(
+    "Energy Discharged",
+    f"{st.session_state.discharged_energy_wh:.4f} Wh"
+)
+
+p3.metric(
+    "Energy Received",
+    f"{st.session_state.charged_energy_wh:.4f} Wh"
+)
+
+st.caption(
+    "Energy totals accumulate during simulation steps. "
+    "Manual mode accumulates energy when you advance the simulation."
+)
 
 # =========================================================
-# 18. PERFORMANCE GRAPHS
-# ====================================================
+# 19. PERFORMANCE GRAPHS
+# =========================================================
+
+st.markdown("### BATTERY PERFORMANCE GRAPHS")
+
+if st.session_state.history:
+
+    df = pd.DataFrame(st.session_state.history)
+
+    # Calculate power from recorded voltage and current.
+    df["Power (W)"] = (
+        df["Voltage (V)"] * df["Current (A)"]
+    )
+
+    # Voltage graph.
+    st.plotly_chart(
+        create_line_chart(
+            df,
+            "Time (s)",
+            "Voltage (V)",
+            "Battery Voltage vs Time",
+            "Voltage (V)",
+            "#38BDF8"
+        ),
+        use_container_width=True,
+        config={"displayModeBar": False}
+    )
+
+    # Current graph.
+    st.plotly_chart(
+        create_line_chart(
+            df,
+            "Time (s)",
+            "Current (A)",
+            "Battery Current vs Time",
+            "Current (A)",
+            "#F59E0B"
+        ),
+        use_container_width=True,
+        config={"displayModeBar": False}
+    )
+
+    # Temperature graph.
+    st.plotly_chart(
+        create_line_chart(
+            df,
+            "Time (s)",
+            "Temperature (°C)",
+            "Battery Temperature vs Time",
+            "Temperature (°C)",
+            "#EF4444"
+        ),
+        use_container_width=True,
+        config={"displayModeBar": False}
+    )
+
+    # Power graph.
+    st.plotly_chart(
+        create_line_chart(
+            df,
+            "Time (s)",
+            "Power (W)",
+            "Battery Power vs Time",
+            "Power (W)",
+            "#22C55E"
+        ),
+        use_container_width=True,
+        config={"displayModeBar": False}
+    )
+
+else:
+
+    st.info(
+        "Start automatic simulation or record/advance manual readings "
+        "to generate performance graphs."
+    )
+
+# =========================================================
+# 20. FAULT HISTORY
+# =========================================================
+
+st.markdown("### FAULT EVENT HISTORY")
+
+if st.session_state.fault_history:
+
+    fault_df = pd.DataFrame(st.session_state.fault_history)
+
+    st.dataframe(
+        fault_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    fault_csv = fault_df.to_csv(index=False).encode("utf-8")
+
+    st.download_button(
+        "Download Fault History CSV",
+        data=fault_csv,
+        file_name="smart_bms_fault_history.csv",
+        mime="text/csv"
+    )
+
+else:
+
+    st.info("No fault events have been recorded.")
+
+# =========================================================
+# 21. PERFORMANCE DATA EXPORT
+# =========================================================
+st.markdown("### PERFORMANCE DATA")
+
+if st.session_state.history:
+
+    export_df = pd.DataFrame(st.session_state.history)
+
+    export_df["Power (W)"] = (
+        export_df["Voltage (V)"] * export_df["Current (A)"]
+    )
+
+    st.dataframe(
+        export_df.tail(10),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    performance_csv = export_df.to_csv(index=False).encode("utf-8")
+
+    st.download_button(
+        "Download Performance Data CSV",
+        data=performance_csv,
+        file_name="smart_bms_performance_data.csv",
+        mime="text/csv"
+    )
+
+else:
+
+    st.info("Performance readings will appear here once recorded.")
+
+# =========================================================
+# 22. SYSTEM INFORMATION
+# =========================================================
+
+st.markdown("### SYSTEM INFORMATION")
+
+s1, s2, s3 = st.columns(3)
+
+s1.metric("Battery Configuration", f"{N_SERIES}S{N_PARALLEL}P")
+s2.metric("Nominal Pack Voltage", f"{NOMINAL_VOLTAGE:.1f} V")
+s3.metric("Simulation Time", f"{st.session_state.sim_seconds:.0f} s")
+
+st.markdown("""
+**Battery Model:** Lithium-ion battery pack (illustrative model)
+
+**Configuration:** 13 series × 4 parallel cells (13S4P)
+
+**Nominal Cell Voltage:** 3.6 V
+
+**Cell Voltage Range:** 3.0–4.2 V
+
+**Pack Nominal Voltage:** 46.8 V
+
+**Rated Capacity:** User-configurable (default 10 Ah)
+
+**Simulation Time Step:** 2 seconds (automatic) / 10 seconds (manual advance)
+
+**SoC Estimation:** Coulomb Counting
+
+**Voltage Model:** Simplified OCV and internal resistance
+
+**Thermal Model:** Simplified I²R heat generation and ambient cooling
+
+**SoH:** Not calculated; requires measured capacity test data
+
+**Data Source:** Mathematical simulation / manual test inputs
+
+**Hardware Status:** Not yet connected
+
+**Note:** This dashboard is a development prototype. Model parameters and warning thresholds are illustrative and must be validated against the selected cell manufacturer's specifications before any physical battery testing.
+""")
+
+# =========================================================
+# 23. FOOTER
+# =========================================================
+st.divider()
+
+st.markdown("""
+<p style="text-align:center;color:#64748B;">
+Smart EV Battery Management System | Version 4.1 |
+Battery Performance and Energy Analysis
+</p>
+""", unsafe_allow_html=True)
