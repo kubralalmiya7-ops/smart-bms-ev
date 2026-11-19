@@ -1,6 +1,9 @@
-# SMART EV BATTERY MANAGEMENT SYSTEM — V4.3
-# Intelligent Protection & Fault Recovery
-# Software simulation only; not certified battery protection hardware.
+# ==============================================================
+# SMART EV BATTERY MANAGEMENT SYSTEM
+# Version 4.4
+# Cell-Level Monitoring & Intelligent Balancing
+# Reconstructed integrated simulation application
+# ==============================================================
 
 import streamlit as st
 import pandas as pd
@@ -9,304 +12,1879 @@ import plotly.graph_objects as go
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config(page_title="Smart EV BMS V4.3", page_icon="🔋", layout="wide")
-st.markdown("""\n<style>
-.stApp {background:#0b1120;color:#e8eef7}
-[data-testid="stSidebar"] {background:#111a2b}
-.status-normal{background:#12382b;color:#4ade80;padding:12px;border-radius:10px;font-weight:bold}
-.status-warning{background:#463416;color:#fbbf24;padding:12px;border-radius:10px;font-weight:bold}
-.status-critical{background:#4a1e26;color:#fb7185;padding:12px;border-radius:10px;font-weight:bold}
+# ==============================================================
+# 1. PAGE CONFIGURATION
+# ==============================================================
+
+st.set_page_config(
+    page_title="Smart EV BMS V4.4",
+    page_icon="🔋",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ==============================================================
+# 2. CUSTOM DESIGN
+# ==============================================================
+
+st.markdown("""
+<style>
+    .main {
+        background-color: #0e1117;
+    }
+    [data-testid="stMetric"] {
+        background-color: #171d27;
+        padding: 15px;
+        border: 1px solid #263245;
+        border-radius: 12px;
+    }
+    div[data-testid="stMetricLabel"] {
+        color: #aab8c9;
+    }
+    div[data-testid="stMetricValue"] {
+        color: #f3f6fa;
+    }
+    .status-normal {
+        background-color: #123a2a;
+        color: #7dffb2;
+        padding: 12px;
+        border-radius: 10px;
+        font-weight: bold;
+    }
+    .status-warning {
+        background-color: #493517;
+        color: #ffd166;
+        padding: 12px;
+        border-radius: 10px;
+        font-weight: bold;
+    }
+    .status-critical {
+        background-color: #4a2025;
+        color: #ff7777;
+        padding: 12px;
+        border-radius: 10px;
+        font-weight: bold;
+    }
+    .small-note {
+        color: #9ca8b8;
+        font-size: 13px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# Battery model: 13S4P Li-ion pack, illustrative parameters
-SERIES, PARALLEL = 13, 4
-CELL_NOM, CELL_MIN, CELL_MAX = 3.6, 3.0, 4.2
-PACK_NOM, PACK_MIN, PACK_MAX = SERIES*CELL_NOM, SERIES*CELL_MIN, SERIES*CELL_MAX
-DEFAULT_AH, R_INTERNAL = 10.0, 0.08
-AMBIENT, THERMAL_CAP, COOL_COEFF = 25.0, 500.0, 1.5
+# ==============================================================
+# 3. BATTERY CONFIGURATION
+# ==============================================================
 
-# Thresholds and hysteresis recovery thresholds
-V_LOW_WARN, V_LOW_CLEAR = 42.0, 43.0
-V_LOW_CRIT, V_LOW_CRIT_CLEAR = PACK_MIN, 40.5
-V_HIGH_WARN, V_HIGH_CLEAR = 53.0, 52.0
-V_HIGH_CRIT, V_HIGH_CRIT_CLEAR = PACK_MAX, 53.5
-I_WARN, I_WARN_CLEAR, I_CRIT, I_CRIT_CLEAR = 20.0, 18.0, 25.0, 22.0
-T_WARN, T_WARN_CLEAR, T_CRIT, T_CRIT_CLEAR = 45.0, 42.0, 55.0, 48.0
-WARNING_FACTOR, RESTORE_STEP_A = 0.50, 1.0
+SERIES_CELLS = 13
+PARALLEL_CELLS = 4
 
-DEFAULTS = {
-    "soc":80.0, "temperature":25.0, "voltage":PACK_NOM, "current":0.0,
-    "requested_current":0.0, "effective_current":0.0, "capacity_ah":DEFAULT_AH,
-    "discharged_wh":0.0, "charged_wh":0.0, "peak_temp":25.0,
-    "heating_rate":0.0, "cooling_power":0.0, "thermal_state":"Normal",
-    "safety_action":"Normal operation", "fault_flags":{}, "fault_history":[],
-    "performance_history":[], "thermal_history":[], "recovery_mode":False,
-    "simulation_elapsed":0
-}
-for k,v in DEFAULTS.items():
-    if k not in st.session_state:
-        st.session_state[k] = v.copy() if isinstance(v,(dict,list)) else v
+CELL_NOMINAL_VOLTAGE = 3.6
+CELL_MIN_VOLTAGE = 3.0
+CELL_MAX_VOLTAGE = 4.2
 
-def now(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-def log_event(event,severity,action,details=""):
-    st.session_state.fault_history.insert(0, {"Timestamp":now(),"Event":event,"Severity":severity,"Action":action,"Details":details})
-    st.session_state.fault_history = st.session_state.fault_history[:500]
-def log_perf():
-    s=st.session_state
-    s.performance_history.append({"Timestamp":now(),"Voltage (V)":round(s.voltage,2),"Current (A)":round(s.current,2),"Requested Current (A)":round(s.requested_current,2),"Effective Current (A)":round(s.effective_current,2),"Temperature (°C)":round(s.temperature,2),"SoC (%)":round(s.soc,2),"Power (W)":round(s.voltage*s.current,2),"Thermal State":s.thermal_state,"Safety Action":s.safety_action})
-    s.performance_history=s.performance_history[-1000:]
-def log_thermal():
-    s=st.session_state
-    s.thermal_history.append({"Timestamp":now(),"Temperature (°C)":round(s.temperature,2),"Heating Rate (°C/min)":round(s.heating_rate,2),"Cooling Power (W)":round(s.cooling_power,2),"Thermal State":s.thermal_state})
-    s.thermal_history=s.thermal_history[-1000:]
-def reset_all():
-    for k,v in DEFAULTS.items(): st.session_state[k]=v.copy() if isinstance(v,(dict,list)) else v
+PACK_NOMINAL_VOLTAGE = SERIES_CELLS * CELL_NOMINAL_VOLTAGE
+PACK_MIN_VOLTAGE = SERIES_CELLS * CELL_MIN_VOLTAGE
+PACK_MAX_VOLTAGE = SERIES_CELLS * CELL_MAX_VOLTAGE
+
+CAPACITY_AH = 10.0
+INTERNAL_RESISTANCE = 0.08
+
+AMBIENT_TEMP = 25.0
+THERMAL_CAPACITY = 500.0
+COOLING_COEFFICIENT = 1.5
+
+WARNING_TEMP_ON = 45.0
+WARNING_TEMP_OFF = 42.0
+CRITICAL_TEMP_ON = 55.0
+CRITICAL_TEMP_OFF = 48.0
+
+WARNING_VOLTAGE_LOW_ON = 42.0
+WARNING_VOLTAGE_LOW_OFF = 43.0
+WARNING_VOLTAGE_HIGH_ON = 53.0
+WARNING_VOLTAGE_HIGH_OFF = 52.0
+
+CRITICAL_VOLTAGE_LOW_ON = 39.0
+CRITICAL_VOLTAGE_LOW_OFF = 40.5
+CRITICAL_VOLTAGE_HIGH_ON = 54.6
+CRITICAL_VOLTAGE_HIGH_OFF = 53.5
+
+WARNING_CURRENT_ON = 20.0
+WARNING_CURRENT_OFF = 18.0
+CRITICAL_CURRENT_ON = 25.0
+CRITICAL_CURRENT_OFF = 22.0
+
+# Cell imbalance thresholds
+CELL_IMBALANCE_WARNING = 0.050
+CELL_IMBALANCE_CRITICAL = 0.100
+
+# Weak cell detection
+WEAK_CELL_WARNING_VOLTAGE = 3.10
+WEAK_CELL_CRITICAL_VOLTAGE = 3.00
+
+# Cell balancing simulation
+BALANCING_START_DIFFERENCE = 0.020
+BALANCING_RATE = 0.0015
+
+# ==============================================================
+# 4. SESSION STATE INITIALIZATION
+# ==============================================================
+
+def initialize_state():
+
+    defaults = {
+        "soc": 80.0,
+        "temperature": 25.0,
+        "pack_voltage": 46.8,
+        "requested_current": 0.0,
+        "effective_current": 0.0,
+
+        "peak_temperature": 25.0,
+        "heating_rate": 0.0,
+        "cooling_power": 0.0,
+
+        "energy_discharged": 0.0,
+        "energy_charged": 0.0,
+        "consumed_capacity": 0.0,
+
+        "simulation_time": 0,
+        "protection": {
+            "temp_warning": False,
+            "temp_critical": False,
+            "voltage_low_warning": False,
+            "voltage_high_warning": False,
+            "voltage_low_critical": False,
+            "voltage_high_critical": False,
+            "current_warning": False,
+            "current_critical": False,
+        },
+
+        "cell_offsets": np.zeros(SERIES_CELLS),
+        "cell_voltages": np.ones(SERIES_CELLS) * 3.6,
+        "cell_balancing_active": False,
+        "balancing_count": 0,
+        "balancing_history": [],
+        "cell_fault_history": [],
+
+        "fault_log": [],
+        "performance_history": [],
+        "thermal_history": [],
+        "previous_temperature": 25.0,
+
+        "last_fault_state": "NORMAL",
+        "last_cell_state": "NORMAL",
+
+        "manual_voltage": 46.8,
+        "manual_current": 15.0,
+        "manual_temperature": 25.0,
+
+        "auto_scenario": "Driving - Low Load",
+        "cell_scenario": "Normal cells",
+    }
+
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+    # Generate initial slight cell variation
+    if "cells_initialized" not in st.session_state:
+        offsets = np.random.uniform(-0.012, 0.012, SERIES_CELLS)
+        offsets -= np.mean(offsets)
+        st.session_state.cell_offsets = offsets
+        st.session_state.cells_initialized = True
+
+initialize_state()
+
+# ==============================================================
+# 5. UTILITY FUNCTIONS
+# ==============================================================
+
+def timestamp():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%:%S") if False else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def add_fault_event(event, details, severity="INFO"):
+    st.session_state.fault_log.append({
+        "Time": timestamp(),
+        "Event": event,
+        "Details": details,
+        "Severity": severity
+    })
+
+
+def add_cell_event(event, details, severity="INFO"):
+    st.session_state.cell_fault_history.append({
+        "Time": timestamp(),
+        "Event": event,
+        "Details": details,
+        "Severity": severity
+    })
+
+
+def clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def pack_ocv_from_soc(soc):
+    """
+    Approximate pack open-circuit voltage.
+    This is a simplified educational model, not a chemistry-specific
+    calibrated lithium-ion voltage curve.
+    """
+    cell_ocv = 3.0 + (soc / 100.0) * 1.2
+    return cell_ocv * SERIES_CELLS
+
+
+def get_protection_state():
+    p = st.session_state.protection
+
+    critical = (
+        p["temp_critical"]
+        or p["voltage_low_critical"]
+        or p["voltage_high_critical"]
+        or p["current_critical"]
+    )
+
+    warning = (
+        p["temp_warning"]
+        or p["voltage_low_warning"]
+        or p["voltage_high_warning"]
+        or p["current_warning"]
+    )
+
+    if critical:
+        return "CRITICAL"
+    if warning:
+        return "WARNING"
+    return "NORMAL"
+
+
+def get_protection_action():
+    state = get_protection_state()
+
+    if state == "CRITICAL":
+        return "Critical Shutdown — Load Disabled"
+
+    if state == "WARNING":
+        return "Warning — Load Reduced"
+
+    if abs(st.session_state.effective_current -
+           st.session_state.requested_current) > 0.01:
+        return "Recovery Mode — Load Restoring Gradually"
+
+    return "Normal Control — Load Restored"
+
+
+def get_cell_state():
+    voltages = st.session_state.cell_voltages
+    difference = float(np.max(voltages) - np.min(voltages))
+    minimum = float(np.min(voltages))
+
+    if minimum <= WEAK_CELL_CRITICAL_VOLTAGE:
+        return "CRITICAL"
+
+    if difference >= CELL_IMBALANCE_CRITICAL:
+        return "CRITICAL"
+
+    if minimum < WEAK_CELL_WARNING_VOLTAGE:
+        return "WARNING"
+
+    if difference >= CELL_IMBALANCE_WARNING:
+        return "WARNING"
+
+    return "NORMAL"
+
+# ==============================================================
+# 6. PROTECTION SYSTEM WITH HYSTERESIS
+# ==============================================================
+
+def update_protection(voltage, current, temperature):
+
+    p = st.session_state.protection
+    events = []
+
+    # ---------------- TEMP WARNING ----------------
+    if not p["temp_warning"] and temperature >= WARNING_TEMP_ON:
+        p["temp_warning"] = True
+        events.append(("High Temperature Warning", "Temperature warning activated", "WARNING"))
+
+    elif p["temp_warning"] and temperature <= WARNING_TEMP_OFF:
+        p["temp_warning"] = False
+        events.append(("High Temperature Warning", "Temperature warning recovered", "INFO"))
+
+    # ---------------- TEMP CRITICAL ----------------
+    if not p["temp_critical"] and temperature >= CRITICAL_TEMP_ON:
+        p["temp_critical"] = True
+        events.append(("Critical Temperature", "Critical temperature shutdown activated", "CRITICAL"))
+
+    elif p["temp_critical"] and temperature <= CRITICAL_TEMP_OFF:
+        p["temp_critical"] = False
+        events.append(("Critical Temperature", "Critical temperature recovered", "INFO"))
+
+    # ---------------- LOW VOLTAGE WARNING ----------------
+    if not p["voltage_low_warning"] and voltage <= WARNING_VOLTAGE_LOW_ON:
+        p["voltage_low_warning"] = True
+        events.append(("Low Voltage Warning", "Low pack voltage warning activated", "WARNING"))
+
+    elif p["voltage_low_warning"] and voltage >= WARNING_VOLTAGE_LOW_OFF:
+        p["voltage_low_warning"] = False
+        events.append(("Low Voltage Warning", "Low pack voltage warning recovered", "INFO"))
+
+    # ---------------- HIGH VOLTAGE WARNING ----------------
+    if not p["voltage_high_warning"] and voltage >= WARNING_VOLTAGE_HIGH_ON:
+        p["voltage_high_warning"] = True
+        events.append(("High Voltage Warning", "High pack voltage warning activated", "WARNING"))
+
+    elif p["voltage_high_warning"] and voltage <= WARNING_VOLTAGE_HIGH_OFF:
+        p["voltage_high_warning"] = False
+        events.append(("High Voltage Warning", "High pack voltage warning recovered", "INFO"))
+
+    # ---------------- LOW VOLTAGE CRITICAL ----------------
+    if not p["voltage_low_critical"] and voltage <= CRITICAL_VOLTAGE_LOW_ON:
+        p["voltage_low_critical"] = True
+        events.append(("Critical Low Voltage", "Critical low voltage shutdown activated", "CRITICAL"))
+
+    elif p["voltage_low_critical"] and voltage >= CRITICAL_VOLTAGE_LOW_OFF:
+        p["voltage_low_critical"] = False
+        events.append(("Critical Low Voltage", "Critical low voltage recovered", "INFO"))
+
+    # ---------------- HIGH VOLTAGE CRITICAL ----------------
+    if not p["voltage_high_critical"] and voltage >= CRITICAL_VOLTAGE_HIGH_ON:
+        p["voltage_high_critical"] = True
+        events.append(("Critical High Voltage", "Critical high voltage shutdown activated", "CRITICAL"))
+
+    elif p["voltage_high_critical"] and voltage <= CRITICAL_VOLTAGE_HIGH_OFF:
+        p["voltage_high_critical"] = False
+        events.append(("Critical High Voltage", "Critical high voltage recovered", "INFO"))
+
+    # ---------------- CURRENT WARNING ----------------
+    if not p["current_warning"] and abs(current) >= WARNING_CURRENT_ON:
+        p["current_warning"] = True
+        events.append(("High Current Warning", "Current warning activated", "WARNING"))
+
+    elif p["current_warning"] and abs(current) <= WARNING_CURRENT_OFF:
+        p["current_warning"] = False
+        events.append(("High Current Warning", "Current warning recovered", "INFO"))
+
+    # ---------------- CURRENT CRITICAL ----------------
+    if not p["current_critical"] and abs(current) >= CRITICAL_CURRENT_ON:
+        p["current_critical"] = True
+        events.append(("Critical Current", "Critical current protection activated", "CRITICAL"))
+
+    elif p["current_critical"] and abs(current) <= CRITICAL_CURRENT_OFF:
+        p["current_critical"] = False
+        events.append(("Critical Current", "Critical current protection recovered", "INFO"))
+
+    # Record transition events
+    for event, details, severity in events:
+        add_fault_event(event, details, severity)
+
+    return get_protection_state()
+
+# ==============================================================
+# 7. CELL VOLTAGE MODEL
+# ==============================================================
+
+def generate_cell_voltages(pack_voltage, scenario="Normal cells"):
+
+    average_cell_voltage = pack_voltage / SERIES_CELLS
+
+    offsets = st.session_state.cell_offsets.copy()
+
+    # ---------------- Cell Scenario Injection ----------------
+    if scenario == "Normal cells":
+        pass
+
+    elif scenario == "Cell imbalance":
+        offsets[5] += 0.075
+        offsets[10] -= 0.055
+
+    elif scenario == "Weak cell":
+        offsets[3] -= 0.180
+
+    elif scenario == "Multiple cell imbalance":
+        offsets[1] += 0.090
+        offsets[4] -= 0.080
+        offsets[8] += 0.065
+        offsets[11] -= 0.070
+
+    elif scenario == "High cell":
+        offsets[7] += 0.180
+
+    # Remove net offset so cell voltage sum remains consistent
+    offsets -= np.mean(offsets)
+
+    voltages = average_cell_voltage + offsets
+
+    # Constrain simulated cell voltage
+    voltages = np.clip(
+        voltages,
+        CELL_MIN_VOLTAGE,
+        CELL_MAX_VOLTAGE
+    )
+
+    st.session_state.cell_offsets = offsets
+    st.session_state.cell_voltages = voltages
+
+    return voltages
+
+# ==============================================================
+# 8. CELL BALANCING MODEL
+# ==============================================================
+
+def perform_cell_balancing():
+
+    voltages = st.session_state.cell_voltages.copy()
+
+    average_voltage = float(np.mean(voltages))
+    difference = float(np.max(voltages) - np.min(voltages))
+
+    eligible_cells = np.where(
+        voltages > average_voltage + BALANCING_START_DIFFERENCE
+    )[0]
+
+    active = (
+        difference >= CELL_IMBALANCE_WARNING
+        and len(eligible_cells) > 0
+    )
+
+    st.session_state.cell_balancing_active = active
+
+    if active:
+
+        # Simulation only:
+        # reduce voltage offsets of high cells gradually.
+        for index in eligible_cells:
+            voltages[index] -= BALANCING_RATE
+
+        # Keep pack average unchanged in this balancing visualization.
+        voltages += average_voltage - np.mean(voltages)
+
+        st.session_state.balancing_count += 1
+
+        st.session_state.balancing_history.append({
+            "Time": timestamp(),
+            "Status": "BALANCING ACTIVE",
+            "Cells Selected": ", ".join(
+                [f"C{i+1}" for i in eligible_cells]
+            ),
+            "Voltage Difference (V)": difference,
+            "Average Voltage (V)": average_voltage
+        })
+
+    else:
+        st.session_state.balancing_history.append({
+            "Time": timestamp(),
+            "Status": "BALANCING INACTIVE",
+            "Cells Selected": "None",
+            "Voltage Difference (V)": difference,
+            "Average Voltage (V)": average_voltage
+        })
+
+    st.session_state.cell_voltages = np.clip(
+        voltages,
+        CELL_MIN_VOLTAGE,
+        CELL_MAX_VOLTAGE
+    )
+
+    return active
+
+# ==============================================================
+# 9. CELL FAULT DETECTION
+# ==============================================================
+
+def update_cell_protection():
+
+    voltages = st.session_state.cell_voltages
+    maximum = float(np.max(voltages))
+    minimum = float(np.min(voltages))
+    difference = maximum - minimum
+
+    cell_state = get_cell_state()
+    previous_state = st.session_state.last_cell_state
+
+    if cell_state != previous_state:
+
+        if cell_state == "WARNING":
+            add_cell_event(
+                "Cell Imbalance Warning",
+                f"Cell imbalance/weak cell detected. ΔV={difference:.3f} V",
+                "WARNING"
+            )
+
+        elif cell_state == "CRITICAL":
+            add_cell_event(
+                "Critical Cell Condition",
+                f"Critical cell voltage condition. ΔV={difference:.3f} V, minimum={minimum:.3f} V",
+                "CRITICAL"
+            )
+
+        elif cell_state == "NORMAL":
+            add_cell_event(
+                "Cell Condition Recovered",
+                "Cell voltage condition returned to normal",
+                "INFO"
+            )
+
+        st.session_state.last_cell_state = cell_state
+
+    # Individual weak cell events
+    for index, value in enumerate(voltages):
+
+        if value < WEAK_CELL_WARNING_VOLTAGE:
+            severity = (
+                "CRITICAL"
+                if value <= WEAK_CELL_CRITICAL_VOLTAGE
+                else "WARNING"
+            )
+
+            add_cell_event(
+                f"Weak Cell C{index+1:02d}",
+                f"Cell voltage is {value:.3f} V",
+                severity
+            )
+
+    return cell_state
+
+# ==============================================================
+# 10. SIMULATION ENGINE
+# ==============================================================
+
+def simulation_step(requested_current, duration_seconds=2):
+
+    old_temp = st.session_state.temperature
+    old_soc = st.session_state.soc
+
+    st.session_state.requested_current = float(requested_current)
+
+    # ==========================================================
+    # SOC COULOMB COUNTING
+    # ==========================================================
+
+    current = float(requested_current)
+
+    soc_change = (
+        current * duration_seconds
+        / (3600.0 * CAPACITY_AH)
+        * 100.0
+    )
+
+    st.session_state.soc = clamp(
+        st.session_state.soc - soc_change,
+        0.0,
+        100.0
+    )
+
+    st.session_state.consumed_capacity += (
+        max(current, 0.0) * duration_seconds / 3600.0
+    )
+
+    # ==========================================================
+    # PACK VOLTAGE MODEL
+    # ==========================================================
+
+    ocv = pack_ocv_from_soc(st.session_state.soc)
+
+    pack_voltage = (
+        ocv - current * INTERNAL_RESISTANCE
+    )
+
+    pack_voltage = clamp(
+        pack_voltage,
+        PACK_MIN_VOLTAGE,
+        PACK_MAX_VOLTAGE
+    )
+
+    st.session_state.pack_voltage = pack_voltage
+
+    # ==========================================================
+    # THERMAL MODEL
+    # ==========================================================
+
+    heat_generated = (
+        (current ** 2)
+        * INTERNAL_RESISTANCE
+    )
+
+    cooling = (
+        COOLING_COEFFICIENT
+        * (st.session_state.temperature - AMBIENT_TEMP)
+    )
+
+    net_heat = heat_generated - cooling
+
+    temp_change = (
+        net_heat * duration_seconds
+        / THERMAL_CAPACITY
+    )
+
+    st.session_state.temperature += temp_change
+
+    st.session_state.temperature = clamp(
+        st.session_state.temperature,
+        AMBIENT_TEMP,
+        80.0
+    )
+
+    st.session_state.heating_rate = (
+        st.session_state.temperature - old_temp
+    ) / duration_seconds
+
+    st.session_state.peak_temperature = max(
+        st.session_state.peak_temperature,
+        st.session_state.temperature
+    )
+
+    st.session_state.cooling_power = max(
+        0.0,
+        COOLING_COEFFICIENT
+        * (st.session_state.temperature - AMBIENT_TEMP)
+    )
+
+    # ==========================================================
+    # PROTECTION
+    # ==========================================================
+
+    update_protection(
+        st.session_state.pack_voltage,
+        requested_current,
+        st.session_state.temperature
+    )
+
+    protection_state = get_protection_state()
+
+    if protection_state == "CRITICAL":
+        target_current = 0.0
+
+    elif protection_state == "WARNING":
+        target_current = requested_current * 0.5
+
+    else:
+        target_current = requested_current
+
+    # Gradual load recovery
+    if protection_state == "NORMAL":
+
+        difference = target_current - st.session_state.effective_current
+
+        if abs(difference) <= 1.0:
+            st.session_state.effective_current = target_current
+        else:
+            st.session_state.effective_current += (
+                1.0 if difference > 0 else -1.0
+            )
+
+    else:
+        st.session_state.effective_current = target_current
+
+    # Recalculate terminal voltage using protected current
+    protected_voltage = (
+        pack_ocv_from_soc(st.session_state.soc)
+        - st.session_state.effective_current
+        * INTERNAL_RESISTANCE
+    )
+
+    st.session_state.pack_voltage = clamp(
+        protected_voltage,
+        PACK_MIN_VOLTAGE,
+        PACK_MAX_VOLTAGE
+    )
+
+    # Final protection check after current reduction
+    update_protection(
+        st.session_state.pack_voltage,
+        st.session_state.effective_current,
+        st.session_state.temperature
+    )
+
+    # ==========================================================
+    # POWER & ENERGY
+    # ==============================================================
+
+    power = (
+        st.session_state.pack_voltage
+        * st.session_state.effective_current
+    )
+
+    if power >= 0:
+        st.session_state.energy_discharged += (
+            power * duration_seconds / 3600.0
+        )
+    else:
+        st.session_state.energy_charged += (
+            abs(power) * duration_seconds / 3600.0
+        )
+
+    # ==========================================================
+    # CELL MODEL
+    # ==============================================================
+
+    generate_cell_voltages(
+        st.session_state.pack_voltage,
+        st.session_state.cell_scenario
+    )
+
+    perform_cell_balancing()
+    update_cell_protection()
+
+    # ==========================================================
+    # HISTORY
+    # ==============================================================
+
+    st.session_state.simulation_time += duration_seconds
+
+    st.session_state.performance_history.append({
+        "Time (s)": st.session_state.simulation_time,
+        "Voltage (V)": st.session_state.pack_voltage,
+        "Current (A)": st.session_state.effective_current,
+        "Requested Current (A)": requested_current,
+        "Temperature (°C)": st.session_state.temperature,
+        "Power (W)": power,
+        "SoC (%)": st.session_state.soc
+    })
+
+    st.session_state.thermal_history.append({
+        "Time (s)": st.session_state.simulation_time,
+        "Temperature (°C)": st.session_state.temperature,
+        "Heating Rate (°C/s)": st.session_state.heating_rate,
+        "Cooling Power (W)": st.session_state.cooling_power
+    })
+
+# ==============================================================
+# 11. MANUAL SIMULATION ADVANCE
+# ==============================================================
+
+def manual_simulation_step():
+
+    # Manual mode uses user-provided voltage, current and temperature.
+    # Temperature is held at the entered value for fault testing.
+
+    st.session_state.requested_current = st.session_state.manual_current
+    st.session_state.pack_voltage = st.session_state.manual_voltage
+    st.session_state.temperature = st.session_state.manual_temperature
+
+    update_protection(
+        st.session_state.pack_voltage,
+        st.session_state.requested_current,
+        st.session_state.temperature
+    )
+
+    state = get_protection_state()
+
+    if state == "CRITICAL":
+        target_current = 0.0
+
+    elif state == "WARNING":
+        target_current = st.session_state.requested_current * 0.5
+
+    else:
+        target_current = st.session_state.requested_current
+
+    # One amp per manual 10-second advance while in normal recovery
+    if state == "NORMAL":
+
+        difference = target_current - st.session_state.effective_current
+
+        if abs(difference) <= 1.0:
+            st.session_state.effective_current = target_current
+        else:
+            st.session_state.effective_current += (
+                1.0 if difference > 0 else -1.0
+            )
+
+    else:
+        st.session_state.effective_current = target_current
+
+    # Update SOC based on protected effective current
+    current = st.session_state.effective_current
+
+    st.session_state.soc = clamp(
+        st.session_state.soc
+        - current * 10.0
+        / (3600.0 * CAPACITY_AH)
+        * 100.0,
+        0.0,
+        100.0
+    )
+
+    st.session_state.consumed_capacity += (
+        max(current, 0.0) * 10.0 / 3600.0
+    )
+
+    # Temperature is user-controlled in manual mode
+    st.session_state.heating_rate = 0.0
+    st.session_state.peak_temperature = max(
+        st.session_state.peak_temperature,
+        st.session_state.temperature
+    )
+
+    st.session_state.cooling_power = max(
+        0.0,
+        COOLING_COEFFICIENT
+        * (st.session_state.temperature - AMBIENT_TEMP)
+    )
+
+    # Power and energy
+    power = (
+        st.session_state.pack_voltage
+        * st.session_state.effective_current
+    )
+
+    if power >= 0:
+        st.session_state.energy_discharged += (
+            power * 10.0 / 3600.0
+        )
+    else:
+        st.session_state.energy_charged += (
+            abs(power) * 10.0 / 3600.0
+        )
+
+    # Update cell voltages from manual pack voltage
+    generate_cell_voltages(
+        st.session_state.pack_voltage,
+        st.session_state.cell_scenario
+    )
+
+    perform_cell_balancing()
+    update_cell_protection()
+
+    st.session_state.simulation_time += 10
+
+    st.session_state.performance_history.append({
+        "Time (s)": st.session_state.simulation_time,
+        "Voltage (V)": st.session_state.pack_voltage,
+        "Current (A)": st.session_state.effective_current,
+        "Requested Current (A)": st.session_state.requested_current,
+        "Temperature (°C)": st.session_state.temperature,
+        "Power (W)": power,
+        "SoC (%)": st.session_state.soc
+    })
+
+    st.session_state.thermal_history.append({
+        "Time (s)": st.session_state.simulation_time,
+        "Temperature (°C)": st.session_state.temperature,
+        "Heating Rate (°C/s)": st.session_state.heating_rate,
+        "Cooling Power (W)": st.session_state.cooling_power
+    })
+
+# ==============================================================
+# 12. RESET SYSTEM
+# ==============================================================
+
+def reset_system():
+
+    keys_to_delete = list(st.session_state.keys())
+
+    for key in keys_to_delete:
+        del st.session_state[key]
+
+    initialize_state()
+
+# ==============================================================
+# 13. SIDEBAR
+# ==============================================================
+
+st.sidebar.title("🔋 Smart EV BMS")
+st.sidebar.caption("Version 4.4 | Cell Monitoring & Balancing")
+
+mode = st.sidebar.radio(
+    "Operating Mode",
+    ["Automatic Simulation", "Manual Fault Testing"]
+)
+
+st.sidebar.divider()
+
+st.sidebar.subheader("Cell Simulation Scenario")
+
+cell_scenario = st.sidebar.selectbox(
+    "Cell Condition",
+    [
+        "Normal cells",
+        "Cell imbalance",
+        "Weak cell",
+        "Multiple cell imbalance",
+        "High cell"
+    ],
+    index=[
+        "Normal cells",
+        "Cell imbalance",
+        "Weak cell",
+        "Multiple cell imbalance",
+        "High cell"
+    ].index(st.session_state.cell_scenario)
+)
+
+st.session_state.cell_scenario = cell_scenario
+
+st.sidebar.caption(
+    "Cell conditions are simulated. No physical battery sensors are connected."
+)
+
+st.sidebar.divider()
+
+if st.sidebar.button("🔄 Reset System", use_container_width=True):
+    reset_system()
     st.rerun()
 
-def ocv(soc): return (3.0+np.clip(soc,0,100)/100*1.2)*SERIES
-def calc_voltage(soc,current): return float(np.clip(ocv(soc)-current*R_INTERNAL,PACK_MIN,PACK_MAX))
-def calc_soc(soc,current,seconds,capacity):
-    if capacity<=0:return soc
-    return float(np.clip(soc-current*seconds/(3600*capacity)*100,0,100))
-def calc_temp(temp,current,seconds):
-    heat=current**2*R_INTERNAL
-    cooling=COOL_COEFF*(temp-AMBIENT)
-    return float(max(AMBIENT,temp+(heat-cooling)*seconds/THERMAL_CAP))
+# ==============================================================
+# 14. AUTOMATIC SIMULATION CONTROLS
+# ==============================================================
 
-# Stateful hysteresis: faults remain latched until their separate clear threshold.
-def update_flag(name,trigger,clear_condition):
-    flags=st.session_state.fault_flags; was=flags.get(name,False)
-    if not was and trigger: flags[name]=True; return "activated"
-    if was and clear_condition: flags[name]=False; return "recovered"
-    flags[name]=was; return None
-def update_faults():
-    s=st.session_state; v=s.voltage; i=abs(s.requested_current); t=s.temperature
-    checks=[
-        ("High Temperature Warning",t>=T_WARN,t<=T_WARN_CLEAR),
-        ("Critical Temperature",t>=T_CRIT,t<=T_CRIT_CLEAR),
-        ("Low Voltage Warning",v<=V_LOW_WARN,v>=V_LOW_CLEAR),
-        ("Critical Low Voltage",v<=V_LOW_CRIT,v>=V_LOW_CRIT_CLEAR),
-        ("High Voltage Warning",v>=V_HIGH_WARN,v<=V_HIGH_CLEAR),
-        ("Critical High Voltage",v>=V_HIGH_CRIT,v<=V_HIGH_CRIT_CLEAR),
-        ("High Current Warning",i>=I_WARN,i<=I_WARN_CLEAR),
-        ("Critical Overcurrent",i>=I_CRIT,i<=I_CRIT_CLEAR),
-        ("Rapid Temperature Rise",s.heating_rate>=5.0,s.heating_rate<=2.0),
-    ]
-    for name,trig,clear in checks:
-        result=update_flag(name,trig,clear)
-        if result=="activated": log_event(name,"Warning","Fault detected","Protection condition reached")
-        elif result=="recovered": log_event(name,"Recovery","Fault cleared","Recovery threshold satisfied")
+if mode == "Automatic Simulation":
 
-def severity_status():
-    flags=st.session_state.fault_flags
-    critical=[f for f in ["Critical Temperature","Critical Low Voltage","Critical High Voltage","Critical Overcurrent"] if flags.get(f)]
-    warning=[f for f in ["High Temperature Warning","Low Voltage Warning","High Voltage Warning","High Current Warning","Rapid Temperature Rise"] if flags.get(f)]
-    if critical:return "CRITICAL",critical
-    if warning:return "WARNING",warning
-    return "NORMAL",[]
-def apply_safety(requested):
-    s=st.session_state; sev,faults=severity_status(); prev=s.effective_current
-    if sev=="CRITICAL": effective=0.0; action="CRITICAL SHUTDOWN — LOAD DISABLED"; s.recovery_mode=False
-    elif sev=="WARNING": effective=requested*WARNING_FACTOR; action="WARNING — LOAD REDUCED"; s.recovery_mode=False
-    else:
-        delta=requested-prev
-        effective=prev+np.sign(delta)*RESTORE_STEP_A if abs(delta)>RESTORE_STEP_A else requested
-        s.recovery_mode=abs(requested-effective)>1e-9
-        action="NORMAL — CONTROLLED LOAD RESTORATION" if s.recovery_mode else "NORMAL OPERATION"
-    s.effective_current=float(effective); s.safety_action=action
-    return sev,faults,effective,action
+    st.sidebar.subheader("Automatic Simulation")
 
-def gauge(title,value,minv,maxv,unit,color):
-    fig=go.Figure(go.Indicator(mode="gauge+number",value=value,number={"suffix":unit,"font":{"color":"#eaf2ff"}},title={"text":title,"font":{"color":"#eaf2ff"}},gauge={"axis":{"range":[minv,maxv],"tickfont":{"color":"#9fb0c8"}},"bar":{"color":color},"bgcolor":"#162236","borderwidth":1,"bordercolor":"#26364e"}))
-    fig.update_layout(height=255,paper_bgcolor="#0b1120",font_color="#eaf2ff",margin=dict(l=15,r=15,t=45,b=15)); return fig
-def line_chart(df,x,y,title,ylabel):
-    if df.empty: st.info("Chart will appear after simulation advances."); return
-    fig=go.Figure(go.Scatter(x=df[x],y=df[y],mode="lines",name=y,line={"width":2}))
-    fig.update_layout(title=title,xaxis_title="Time",yaxis_title=ylabel,paper_bgcolor="#0b1120",plot_bgcolor="#111a2b",font_color="#eaf2ff",height=330,margin=dict(l=35,r=15,t=45,b=35))
-    st.plotly_chart(fig,use_container_width=True)
+    scenario = st.sidebar.selectbox(
+        "Driving Scenario",
+        [
+            "Idle",
+            "Driving - Low Load",
+            "Driving - High Load",
+            "Charging"
+        ],
+        index=[
+            "Idle",
+            "Driving - Low Load",
+            "Driving - High Load",
+            "Charging"
+        ].index(st.session_state.auto_scenario)
+    )
+
+    st.session_state.auto_scenario = scenario
+
+    scenario_currents = {
+        "Idle": 0.0,
+        "Driving - Low Load": 5.0,
+        "Driving - High Load": 15.0,
+        "Charging": -5.0
+    }
+
+    current = scenario_currents[scenario]
+
+    st_autorefresh(
+        interval=2000,
+        key="auto_refresh"
+    )
+
+    simulation_step(current, duration_seconds=2)
+
+# ==============================================================
+# 15. MANUAL FAULT TESTING CONTROLS
+# ==============================================================
+
+else:
+
+    st.sidebar.subheader("Manual Fault Testing")
+
+    st.session_state.manual_voltage = st.sidebar.slider(
+        "Pack Voltage (V)",
+        min_value=39.0,
+        max_value=54.6,
+        value=float(st.session_state.manual_voltage),
+        step=0.1
+    )
+
+    st.session_state.manual_current = st.sidebar.slider(
+        "Requested Current (A)",
+        min_value=-30.0,
+        max_value=30.0,
+        value=float(st.session_state.manual_current),
+        step=0.5
+    )
+
+    st.session_state.manual_temperature = st.sidebar.slider(
+        "Battery Temperature (°C)",
+        min_value=15.0,
+        max_value=70.0,
+        value=float(st.session_state.manual_temperature),
+        step=0.5
+    )
+
+    st.sidebar.caption(
+        "Manual mode lets you test faults. "
+        "The entered temperature is held for the test."
+    )
+
+    if st.sidebar.button(
+        "▶ Advance Manual Simulation (10 sec)",
+        use_container_width=True
+    ):
+        manual_simulation_step()
+        st.rerun()
+
+# ==============================================================
+# 16. HEADER
+# ==============================================================
 
 st.title("🔋 Smart EV Battery Management System")
-st.caption("Version 4.3 | Intelligent Protection & Fault Recovery")
-st.info("Software simulation: displayed readings are simulated or manually entered; no real battery sensors are connected.")
 
-# Sidebar inputs
-st.sidebar.title("⚙️ Simulation Controls")
-mode=st.sidebar.radio("Operating Mode",["Automatic Simulation","Manual Fault Testing"],key="mode_choice")
-capacity=st.sidebar.number_input("Battery Capacity (Ah)",min_value=1.0,max_value=100.0,value=float(st.session_state.capacity_ah),step=1.0)
-st.session_state.capacity_ah=capacity
-manual_voltage=PACK_NOM; manual_current=0.0; manual_temperature=25.0; advance=False
-if mode=="Automatic Simulation":
-    scenario=st.sidebar.selectbox("Scenario",["Idle","Driving - Low Load","Driving - High Load","Charging"])
-    requested={"Idle":0.0,"Driving - Low Load":5.0,"Driving - High Load":15.0,"Charging":-5.0}[scenario]
-else:
-    st.sidebar.caption("Set inputs, then press Advance to apply a 10-second test step.")
-    manual_voltage=st.sidebar.slider("Pack Voltage (V)",float(PACK_MIN),float(PACK_MAX),float(np.clip(st.session_state.voltage,PACK_MIN,PACK_MAX)),0.1)
-    manual_current=st.sidebar.slider("Requested Current (A)",-30.0,30.0,float(np.clip(st.session_state.requested_current,-30,30)),0.5)
-    manual_temperature=st.sidebar.slider("Battery Temperature (°C)",15.0,70.0,float(np.clip(st.session_state.temperature,15,70)),0.5)
-    requested=manual_current
-    advance=st.sidebar.button("▶ Advance Manual Simulation (10 sec)",use_container_width=True)
-if st.sidebar.button("🔄 Reset Simulation",use_container_width=True): reset_all()
+st.markdown(
+    "**V4.4 — Cell-Level Monitoring & Intelligent Balancing**"
+)
 
-# Update simulation only in automatic mode, or on explicit manual advance.
-def simulation_step(req,seconds):
-    s=st.session_state; oldtemp=s.temperature; s.requested_current=float(req)
-    s.voltage=calc_voltage(s.soc,req)
-    s.temperature=calc_temp(oldtemp,req,seconds)
-    s.heating_rate=(s.temperature-oldtemp)/seconds*60 if seconds>0 else 0.0
-    s.cooling_power=max(0.0,COOL_COEFF*(s.temperature-AMBIENT))
-    s.peak_temp=max(s.peak_temp,s.temperature)
-    update_faults()
-    _,_,effective,_=apply_safety(req)
-    s.soc=calc_soc(s.soc,effective,seconds,s.capacity_ah)
-    s.voltage=calc_voltage(s.soc,effective)
-    update_faults()
-    s.current=float(effective)
-    power=s.voltage*effective
-    if power>=0:s.discharged_wh+=power*seconds/3600
-    else:s.charged_wh+=abs(power)*seconds/3600
-    s.simulation_elapsed+=seconds
-    if s.fault_flags.get("Critical Temperature",False):s.thermal_state="Critical"
-    elif s.fault_flags.get("High Temperature Warning",False):s.thermal_state="Warning"
-    else:s.thermal_state="Normal"
-    log_perf(); log_thermal()
-if mode=="Automatic Simulation":
-    st_autorefresh(interval=2000,key="refresh_v43")
-    simulation_step(requested,2.0)
-elif advance:
-    # In manual mode, the sliders are direct test inputs. Their values are applied
-    # before fault evaluation; temperature is held at the selected value for this step.
-    s=st.session_state; s.voltage=manual_voltage; s.temperature=manual_temperature
-    s.requested_current=manual_current; s.heating_rate=0.0
-    s.cooling_power=max(0.0,COOL_COEFF*(manual_temperature-AMBIENT)); s.peak_temp=max(s.peak_temp,manual_temperature)
-    update_faults(); _,_,effective,_=apply_safety(manual_current); s.current=effective
-    s.soc=calc_soc(s.soc,effective,10.0,s.capacity_ah); s.voltage=manual_voltage
-    power=manual_voltage*effective
-    if power>=0:s.discharged_wh+=power*10/3600
-    else:s.charged_wh+=abs(power)*10/3600
-    s.simulation_elapsed+=10
-    if s.fault_flags.get("Critical Temperature",False):s.thermal_state="Critical"
-    elif s.fault_flags.get("High Temperature Warning",False):s.thermal_state="Warning"
-    else:s.thermal_state="Normal"
-    log_perf(); log_thermal()
+st.caption(
+    "Simulation prototype | 13S4P lithium-ion pack | "
+    "Automatic simulation and manual fault testing"
+)
 
-# Current status panel
-sev,active=severity_status()
-if sev=="CRITICAL":st.markdown('<div class="status-critical">🚨 CRITICAL — PROTECTION ACTIVE</div>',unsafe_allow_html=True)
-elif sev=="WARNING":st.markdown('<div class="status-warning">⚠️ WARNING — LOAD REDUCTION ACTIVE</div>',unsafe_allow_html=True)
-else:st.markdown('<div class="status-normal">✅ NORMAL — SYSTEM OPERATING</div>',unsafe_allow_html=True)
-if active:st.error("Active fault(s): "+", ".join(active))
-else:st.success("No active faults detected.")
-st.info("**Safety action:** "+st.session_state.safety_action)
-if st.session_state.recovery_mode:st.warning("Recovery mode: load is being restored gradually.")
-
-# Battery overview
-st.header("📊 Battery Overview")
-cols=st.columns(4)
-for col,label,value in zip(cols,["State of Charge","Pack Voltage","Battery Current","Temperature"],[f"{st.session_state.soc:.1f}%",f"{st.session_state.voltage:.2f} V",f"{st.session_state.current:.2f} A",f"{st.session_state.temperature:.2f} °C"]):col.metric(label,value)
-cols=st.columns(4)
-for col,label,value in zip(cols,["Requested Current","Effective Current","Peak Temperature","Heating Rate"],[f"{st.session_state.requested_current:.2f} A",f"{st.session_state.effective_current:.2f} A",f"{st.session_state.peak_temp:.2f} °C",f"{st.session_state.heating_rate:.2f} °C/min"]):col.metric(label,value)
-
-# Gauge panels
-st.header("🎛️ Battery Parameter Gauges")
-gcols=st.columns(3)
-for col,title,val,minv,maxv,unit,color in [
-    (gcols[0],"Voltage",st.session_state.voltage,PACK_MIN,PACK_MAX," V","#38bdf8"),
-    (gcols[1],"Current Magnitude",abs(st.session_state.current),0,30," A","#a78bfa"),
-    (gcols[2],"Temperature",st.session_state.temperature,15,70," °C","#fb923c")]:col.plotly_chart(gauge(title,val,minv,maxv,unit,color),use_container_width=True)
-
-# SoC and capacity
-st.header("🔋 Battery Capacity Analysis")
-sc1,sc2=st.columns([1,1])
-with sc1:
-    socfig=go.Figure(go.Pie(labels=["Remaining","Used"],values=[st.session_state.soc,100-st.session_state.soc],hole=0.65,marker={"colors":["#38bdf8","#263449"]},textinfo="label+percent"))
-    socfig.update_layout(paper_bgcolor="#0b1120",font_color="#eaf2ff",height=300,annotations=[{"text":f"{st.session_state.soc:.1f}%","showarrow":False,"font":{"size":25,"color":"#eaf2ff"}}])
-    st.plotly_chart(socfig,use_container_width=True)
-with sc2:
-    remaining=st.session_state.capacity_ah*st.session_state.soc/100
-    st.metric("Rated Capacity",f"{st.session_state.capacity_ah:.2f} Ah")
-    st.metric("Remaining Capacity",f"{remaining:.2f} Ah")
-    st.metric("Consumed Capacity",f"{st.session_state.capacity_ah-remaining:.2f} Ah")
-    st.caption("SoC uses simulated coulomb counting. SoH is not calculated; it requires measured capacity-test data.")
-
-# Power and energy metrics
-st.header("⚡ Power & Energy Analysis")
-power=st.session_state.voltage*st.session_state.current
-pcols=st.columns(3)
-for col,label,val in zip(pcols,["Instantaneous Power","Energy Discharged","Energy Charged"],[f"{power:.2f} W",f"{st.session_state.discharged_wh:.3f} Wh",f"{st.session_state.charged_wh:.3f} Wh"]):col.metric(label,val)
-st.caption("Positive power indicates discharge; negative power indicates charging.")
-
-# Thermal summary
-st.header("🌡️ Advanced Thermal Management")
-tcols=st.columns(4)
-for col,label,val in zip(tcols,["Thermal State","Peak Temperature","Heating Rate","Estimated Cooling Power"],[st.session_state.thermal_state,f"{st.session_state.peak_temp:.2f} °C",f"{st.session_state.heating_rate:.2f} °C/min",f"{st.session_state.cooling_power:.2f} W"]):col.metric(label,val)
-st.caption("Cooling power is modeled heat removal, not measured cooling-system output.")
-
-# Protection threshold table
-st.header("🛡️ Intelligent Protection System")
-thresholds=pd.DataFrame([
- {"Protection":"Low Voltage Warning","Trigger":f"≤ {V_LOW_WARN:.1f} V","Recovery":f"≥ {V_LOW_CLEAR:.1f} V","Action":"Load reduction"},
- {"Protection":"Critical Low Voltage","Trigger":f"≤ {V_LOW_CRIT:.1f} V","Recovery":f"≥ {V_LOW_CRIT_CLEAR:.1f} V","Action":"Load shutdown"},
- {"Protection":"High Voltage Warning","Trigger":f"≥ {V_HIGH_WARN:.1f} V","Recovery":f"≤ {V_HIGH_CLEAR:.1f} V","Action":"Load reduction"},
- {"Protection":"Critical High Voltage","Trigger":f"≥ {V_HIGH_CRIT:.1f} V","Recovery":f"≤ {V_HIGH_CRIT_CLEAR:.1f} V","Action":"Load shutdown"},
- {"Protection":"High Current Warning","Trigger":f"≥ {I_WARN:.1f} A","Recovery":f"≤ {I_WARN_CLEAR:.1f} A","Action":"Load reduction"},
- {"Protection":"Critical Overcurrent","Trigger":f"≥ {I_CRIT:.1f} A","Recovery":f"≤ {I_CRIT_CLEAR:.1f} A","Action":"Load shutdown"},
- {"Protection":"Temperature Warning","Trigger":f"≥ {T_WARN:.1f} °C","Recovery":f"≤ {T_WARN_CLEAR:.1f} °C","Action":"Load reduction"},
- {"Protection":"Critical Temperature","Trigger":f"≥ {T_CRIT:.1f} °C","Recovery":f"≤ {T_CRIT_CLEAR:.1f} °C","Action":"Load shutdown"},
- {"Protection":"Rapid Temperature Rise","Trigger":"≥ 5 °C/min","Recovery":"≤ 2 °C/min","Action":"Warning / load reduction"},
-])
-st.dataframe(thresholds,use_container_width=True,hide_index=True)
-
-# Graphs
-perf=pd.DataFrame(st.session_state.performance_history); therm=pd.DataFrame(st.session_state.thermal_history)
-st.header("📈 Battery Performance History")
-if not perf.empty:
-    a,b=st.columns(2)
-    with a:line_chart(perf,"Timestamp","Voltage (V)","Voltage Variation","Voltage (V)")
-    with b:line_chart(perf,"Timestamp","Current (A)","Current Variation","Current (A)")
-    a,b=st.columns(2)
-    with a:line_chart(perf,"Timestamp","Temperature (°C)","Temperature Variation","Temperature (°C)")
-    with b:line_chart(perf,"Timestamp","Power (W)","Power Variation","Power (W)")
-    a,b=st.columns(2)
-    with a:line_chart(perf,"Timestamp","SoC (%)","SoC History","SoC (%)")
-    with b:line_chart(perf,"Timestamp","Effective Current (A)","Protected Load History","Current (A)")
-else:st.info("Performance graphs populate after simulation steps.")
-
-st.header("🌡️ Thermal History")
-if not therm.empty:
-    a,b=st.columns(2)
-    with a:line_chart(therm,"Timestamp","Temperature (°C)","Temperature History","°C")
-    with b:line_chart(therm,"Timestamp","Heating Rate (°C/min)","Heating / Cooling Rate","°C/min")
-    a,b=st.columns(2)
-    with a:line_chart(therm,"Timestamp","Cooling Power (W)","Estimated Cooling Power","W")
-    with b:
-        counts=therm["Thermal State"].value_counts()
-        fig=go.Figure(go.Pie(labels=counts.index,values=counts.values,hole=0.5))
-        fig.update_layout(paper_bgcolor="#0b1120",font_color="#eaf2ff",height=320)
-        st.plotly_chart(fig,use_container_width=True)
-else:st.info("Thermal history appears after simulation steps.")
-
-# Fault-event history and downloads
-st.header("📋 Fault Event & Recovery Log")
-faults=pd.DataFrame(st.session_state.fault_history)
-if not faults.empty:
-    st.dataframe(faults,use_container_width=True,hide_index=True)
-    st.download_button("⬇ Download Fault & Recovery CSV",faults.to_csv(index=False).encode(),"smart_bms_v4_3_fault_log.csv","text/csv")
-else:st.info("No fault transitions yet. Try warning, critical, and recovery test conditions in Manual Fault Testing.")
-
-st.header("💾 Performance Data Export")
-if not perf.empty:st.download_button("⬇ Download Performance CSV",perf.to_csv(index=False).encode(),"smart_bms_v4_3_performance.csv","text/csv")
-if not therm.empty:st.download_button("⬇ Download Thermal History CSV",therm.to_csv(index=False).encode(),"smart_bms_v4_3_thermal_history.csv","text/csv")
-
-# Information/footer
-st.header("ℹ️ System Information")
-left,right=st.columns(2)
-with left:
-    st.markdown("**Battery Configuration**")
-    st.write(f"- Lithium-ion battery model\n- Configuration: {SERIES}S{PARALLEL}P\n- Nominal pack voltage: {PACK_NOM:.1f} V\n- Pack voltage range: {PACK_MIN:.1f}–{PACK_MAX:.1f} V\n- Capacity: {st.session_state.capacity_ah:.1f} Ah\n- Internal resistance: {R_INTERNAL:.3f} Ω")
-with right:
-    st.markdown("**Software Configuration**")
-    st.write("- Version: 4.3\n- Automatic simulation and manual testing\n- SoC: Coulomb counting\n- Voltage: simplified OCV and internal resistance model\n- Thermal: simplified heat/cooling model\n- Protection: fault thresholds and hysteresis\n- Priority: Critical > Warning > Normal\n- Recovery: gradual load restoration")
-st.caption("No actual sensor readings or contactor are connected. SoH is not implemented. Academic simulation prototype only.")
 st.divider()
-st.markdown("<div style='text-align:center;color:#8fa3bd'>Smart EV Battery Management System — V4.3<br>Intelligent Protection & Fault Recovery<br>Academic Software Simulation Prototype</div>",unsafe_allow_html=True)
+
+# ==============================================================
+# 17. STATUS SUMMARY
+# ==============================================================
+
+protection_state = get_protection_state()
+cell_state = get_cell_state()
+protection_action = get_protection_action()
+
+if protection_state == "NORMAL":
+    st.markdown(
+        '<div class="status-normal">🟢 SYSTEM NORMAL — '
+        'NO ACTIVE PACK FAULT</div>',
+        unsafe_allow_html=True
+    )
+
+elif protection_state == "WARNING":
+    st.markdown(
+        '<div class="status-warning">🟠 WARNING — '
+        'LOAD REDUCTION ACTIVE</div>',
+        unsafe_allow_html=True
+    )
+
+else:
+    st.markdown(
+        '<div class="status-critical">🔴 CRITICAL — '
+        'SIMULATED LOAD SHUTDOWN</div>',
+        unsafe_allow_html=True
+    )
+
+st.write("")
+
+if cell_state == "NORMAL":
+    st.success("Cell Monitoring: Normal voltage distribution")
+elif cell_state == "WARNING":
+    st.warning("Cell Monitoring: Imbalance or weak cell warning")
+else:
+    st.error("Cell Monitoring: Critical cell condition")
+
+st.info(f"**Safety Action:** {protection_action}")
+
+# ==============================================================
+# 18. BATTERY OVERVIEW
+# ==============================================================
+
+st.header("🔋 Battery Overview")
+
+c1, c2, c3, c4 = st.columns(4)
+
+c1.metric(
+    "State of Charge",
+    f"{st.session_state.soc:.1f}%"
+)
+
+c2.metric(
+    "Pack Voltage",
+    f"{st.session_state.pack_voltage:.2f} V"
+)
+
+c3.metric(
+    "Battery Current",
+    f"{st.session_state.effective_current:.2f} A"
+)
+
+c4.metric(
+    "Temperature",
+    f"{st.session_state.temperature:.1f} °C"
+)
+
+c5, c6, c7, c8 = st.columns(4)
+
+c5.metric(
+    "Requested Current",
+    f"{st.session_state.requested_current:.2f} A"
+)
+
+c6.metric(
+    "Effective Current",
+    f"{st.session_state.effective_current:.2f} A"
+)
+
+c7.metric(
+    "Peak Temperature",
+    f"{st.session_state.peak_temperature:.2f} °C"
+)
+
+c8.metric(
+    "Heating Rate",
+    f"{st.session_state.heating_rate:.3f} °C/s"
+)
+
+# ==============================================================
+# 19. BATTERY PARAMETER GAUGES
+# ==============================================================
+
+st.header("📊 Battery Parameter Analysis")
+
+def make_gauge(title, value, minimum, maximum, unit, thresholds=None):
+
+    steps = []
+
+    if title == "Voltage":
+        steps = [
+            {"range": [minimum, 42.0], "color": "#572c30"},
+            {"range": [42.0, 43.0], "color": "#6a4b24"},
+            {"range": [43.0, 52.0], "color": "#174b39"},
+            {"range": [52.0, 53.0], "color": "#6a4b24"},
+            {"range": [53.0, maximum], "color": "#572c30"}
+        ]
+
+    elif title == "Current":
+        steps = [
+            {"range": [minimum, 18.0], "color": "#174b39"},
+            {"range": [18.0, 20.0], "color": "#6a4b24"},
+            {"range": [20.0, 25.0], "color": "#572c30"},
+            {"range": [25.0, maximum], "color": "#712c34"}
+        ]
+
+    elif title == "Temperature":
+        steps = [
+            {"range": [minimum, 42.0], "color": "#174b39"},
+            {"range": [42.0, 45.0], "color": "#6a4b24"},
+            {"range": [45.0, 55.0], "color": "#805023"},
+            {"range": [55.0, maximum], "color": "#712c34"}
+        ]
+
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=value,
+        number={"suffix": f" {unit}"},
+        title={"text": title},
+        gauge={
+            "axis": {"range": [minimum, maximum]},
+            "bar": {"color": "#60a5fa"},
+            "steps": steps
+        }
+    ))
+
+    fig.update_layout(
+        height=250,
+        margin=dict(l=20, r=20, t=50, b=15),
+        template="plotly_dark"
+    )
+
+    return fig
+
+g1, g2, g3 = st.columns(3)
+
+with g1:
+    st.plotly_chart(
+        make_gauge(
+            "Voltage",
+            st.session_state.pack_voltage,
+            PACK_MIN_VOLTAGE,
+            PACK_MAX_VOLTAGE,
+            "V"
+        ),
+        use_container_width=True
+    )
+
+with g2:
+    st.plotly_chart(
+        make_gauge(
+            "Current",
+            abs(st.session_state.effective_current),
+            0,
+            30,
+            "A"
+        ),
+        use_container_width=True
+    )
+
+with g3:
+    st.plotly_chart(
+        make_gauge(
+            "Temperature",
+            st.session_state.temperature,
+            15,
+            70,
+            "°C"
+        ),
+        use_container_width=True
+    )
+
+# ==============================================================
+# 20. BATTERY CAPACITY ANALYSIS
+# ==============================================================
+
+st.header("🔌 Battery Capacity Analysis")
+
+remaining_capacity = CAPACITY_AH * st.session_state.soc / 100.0
+
+capacity_consumed = (
+    CAPACITY_AH - remaining_capacity
+)
+
+cap1, cap2, cap3 = st.columns(3)
+
+cap1.metric("Rated Capacity", f"{CAPACITY_AH:.2f} Ah")
+cap2.metric("Remaining Capacity", f"{remaining_capacity:.2f} Ah")
+cap3.metric("Consumed Capacity", f"{capacity_consumed:.2f} Ah")
+
+capacity_fig = go.Figure(
+    data=[
+        go.Pie(
+            labels=["Remaining", "Consumed"],
+            values=[remaining_capacity, capacity_consumed],
+            hole=0.65
+        )
+    ]
+)
+
+capacity_fig.update_layout(
+    title="Battery Capacity Distribution",
+    template="plotly_dark",
+    height=320
+)
+
+st.plotly_chart(capacity_fig, use_container_width=True)
+
+# ==============================================================
+# 21. POWER & ENERGY ANALYSIS
+# ==============================================================
+
+st.header("⚡ Power & Energy Analysis")
+
+instantaneous_power = (
+    st.session_state.pack_voltage
+    * st.session_state.effective_current
+)
+
+p1, p2, p3 = st.columns(3)
+
+p1.metric(
+    "Instantaneous Power",
+    f"{instantaneous_power:.2f} W"
+)
+
+p2.metric(
+    "Energy Discharged",
+    f"{st.session_state.energy_discharged:.4f} Wh"
+)
+
+p3.metric(
+    "Energy Charged",
+    f"{st.session_state.energy_charged:.4f} Wh"
+)
+
+# ==============================================================
+# 22. ADVANCED THERMAL MANAGEMENT
+# ==============================================================
+
+st.header("🌡️ Advanced Thermal Management")
+
+thermal_state = (
+    "CRITICAL"
+    if st.session_state.temperature >= CRITICAL_TEMP_ON
+    else "WARNING"
+    if st.session_state.temperature >= WARNING_TEMP_ON
+    else "NORMAL"
+)
+
+th1, th2, th3 = st.columns(3)
+
+th1.metric("Thermal State", thermal_state)
+th2.metric("Peak Temperature", f"{st.session_state.peak_temperature:.2f} °C")
+th3.metric("Cooling Power (Estimated)", f"{st.session_state.cooling_power:.2f} W")
+
+st.caption(
+    "Cooling power is a model estimate of heat removal, not a physical measurement."
+)
+
+if st.session_state.thermal_history:
+
+    thermal_df = pd.DataFrame(st.session_state.thermal_history)
+
+    fig_thermal = go.Figure()
+
+    fig_thermal.add_trace(go.Scatter(
+        x=thermal_df["Time (s)"],
+        y=thermal_df["Temperature (°C)"],
+        mode="lines",
+        name="Temperature"
+    ))
+
+    fig_thermal.add_hline(
+        y=WARNING_TEMP_ON,
+        line_dash="dash",
+        annotation_text="Warning 45°C"
+    )
+
+    fig_thermal.add_hline(
+        y=CRITICAL_TEMP_ON,
+        line_dash="dash",
+        annotation_text="Critical 55°C"
+    )
+
+    fig_thermal.update_layout(
+        title="Thermal History",
+        xaxis_title="Simulation Time (s)",
+        yaxis_title="Temperature (°C)",
+        template="plotly_dark"
+    )
+
+    st.plotly_chart(fig_thermal, use_container_width=True)
+
+# ==============================================================
+# 23. INTELLIGENT PROTECTION SYSTEM
+# ==============================================================
+
+st.header("🛡️ Intelligent Protection System")
+
+p = st.session_state.protection
+
+protection_rows = [
+    ("Low Voltage Warning", p["voltage_low_warning"], "42.0 V", "43.0 V", "Warning"),
+    ("Critical Low Voltage", p["voltage_low_critical"], "39.0 V", "40.5 V", "Shutdown"),
+    ("High Voltage Warning", p["voltage_high_warning"], "53.0 V", "52.0 V", "Warning"),
+    ("Critical High Voltage", p["voltage_high_critical"], "54.6 V", "53.5 V", "Shutdown"),
+    ("High Current Warning", p["current_warning"], "20.0 A", "18.0 A", "Load reduction"),
+    ("Critical Current", p["current_critical"], "25.0 A", "22.0 A", "Shutdown"),
+    ("High Temperature Warning", p["temp_warning"], "45.0°C", "42.0°C", "Load reduction"),
+    ("Critical Temperature", p["temp_critical"], "55.0°C", "48.0°C", "Shutdown"),
+]
+
+protection_df = pd.DataFrame(
+    protection_rows,
+    columns=[
+        "Protection",
+        "Active",
+        "Trigger",
+        "Recovery",
+        "Action"
+    ]
+)
+
+st.dataframe(
+    protection_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+# ==============================================================
+# 24. CELL-LEVEL MONITORING — NEW V4.4
+# ==============================================================
+
+st.header("🔬 Cell-Level Voltage Monitoring")
+st.caption(
+    "13 series cell groups monitored in simulation. "
+    "Each group represents 4 parallel cells."
+)
+
+cell_voltages = st.session_state.cell_voltages
+
+cell_df = pd.DataFrame({
+    "Cell Group": [f"C{i+1:02d}" for i in range(SERIES_CELLS)],
+    "Voltage (V)": np.round(cell_voltages, 3),
+    "Status": [
+        "Critical"
+        if value <= WEAK_CELL_CRITICAL_VOLTAGE
+        else "Weak"
+        if value < WEAK_CELL_WARNING_VOLTAGE
+        else "High"
+        if value > CELL_NOMINAL_VOLTAGE + 0.12
+        else "Normal"
+        for value in cell_voltages
+    ]
+})
+
+# Display individual cell voltage cards
+for start in range(0, SERIES_CELLS, 4):
+
+    group = st.columns(4)
+
+    for j, col in enumerate(group):
+
+        index = start + j
+
+        if index >= SERIES_CELLS:
+            continue
+
+        voltage = cell_voltages[index]
+
+        if voltage <= WEAK_CELL_CRITICAL_VOLTAGE:
+            color = "🔴"
+        elif voltage < WEAK_CELL_WARNING_VOLTAGE:
+            color = "🟠"
+        elif voltage >= CELL_NOMINAL_VOLTAGE + 0.12:
+            color = "🟡"
+        else:
+            color = "🟢"
+
+        with col:
+            st.metric(
+                f"{color} Cell C{index+1:02d}",
+                f"{voltage:.3f} V"
+            )
+
+# ==============================================================
+# 25. CELL VOLTAGE DISTRIBUTION
+# ==============================================================
+
+st.subheader("Cell Voltage Distribution")
+
+cell_fig = go.Figure()
+
+bar_colors = [
+    "#ef4444"
+    if voltage <= WEAK_CELL_CRITICAL_VOLTAGE
+    else "#f59e0b"
+    if voltage < WEAK_CELL_WARNING_VOLTAGE
+    else "#22c55e"
+    if voltage < CELL_NOMINAL_VOLTAGE + 0.12
+    else "#60a5fa"
+    for voltage in cell_voltages
+]
+
+cell_fig.add_trace(go.Bar(
+    x=cell_df["Cell Group"],
+    y=cell_df["Voltage (V)"],
+    marker_color=bar_colors,
+    text=np.round(cell_voltages, 3),
+    textposition="outside",
+    name="Cell Voltage"
+))
+
+cell_fig.add_hline(
+    y=CELL_NOMINAL_VOLTAGE,
+    line_dash="dash",
+    annotation_text="Nominal Cell Voltage 3.6 V"
+)
+
+cell_fig.add_hline(
+    y=WEAK_CELL_WARNING_VOLTAGE,
+    line_dash="dot",
+    annotation_text="Weak Cell Warning 3.1 V"
+)
+
+cell_fig.update_layout(
+    template="plotly_dark",
+    xaxis_title="Cell Group",
+    yaxis_title="Voltage (V)",
+    height=420
+)
+
+st.plotly_chart(cell_fig, use_container_width=True)
+
+st.dataframe(
+    cell_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+# ==============================================================
+# 26. CELL IMBALANCE ANALYSIS
+# ==============================================================
+
+st.subheader("Cell Imbalance Analysis")
+
+cell_average = float(np.mean(cell_voltages))
+cell_maximum = float(np.max(cell_voltages))
+cell_minimum = float(np.min(cell_voltages))
+cell_difference = cell_maximum - cell_minimum
+
+max_cell_index = int(np.argmax(cell_voltages))
+min_cell_index = int(np.argmin(cell_voltages))
+
+imb1, imb2, imb3, imb4 = st.columns(4)
+
+imb1.metric("Average Cell Voltage", f"{cell_average:.3f} V")
+imb2.metric("Highest Cell", f"C{max_cell_index+1:02d} · {cell_maximum:.3f} V")
+imb3.metric("Lowest Cell", f"C{min_cell_index+1:02d} · {cell_minimum:.3f} V")
+imb4.metric("Voltage Difference (ΔV)", f"{cell_difference:.3f} V")
+
+if cell_difference >= CELL_IMBALANCE_CRITICAL:
+    st.error(
+        f"CRITICAL CELL IMBALANCE: ΔV = {cell_difference:.3f} V"
+    )
+
+elif cell_difference >= CELL_IMBALANCE_WARNING:
+    st.warning(
+        f"CELL IMBALANCE WARNING: ΔV = {cell_difference:.3f} V"
+    )
+
+else:
+    st.success(
+        f"Cell voltage difference is within the simulated normal range "
+        f"(ΔV = {cell_difference:.3f} V)."
+    )
+
+# ==============================================================
+# 27. WEAK CELL IDENTIFICATION
+# ==============================================================
+
+st.subheader("Weak Cell Identification")
+
+weak_cells = cell_df[
+    cell_df["Voltage (V)"] < WEAK_CELL_WARNING_VOLTAGE
+]
+
+critical_cells = cell_df[
+    cell_df["Voltage (V)"] <= WEAK_CELL_CRITICAL_VOLTAGE
+]
+
+if len(critical_cells) > 0:
+
+    st.error(
+        "Critical low-voltage cells detected: "
+        + ", ".join(critical_cells["Cell Group"].tolist())
+    )
+
+elif len(weak_cells) > 0:
+
+    st.warning(
+        "Weak cells detected: "
+        + ", ".join(weak_cells["Cell Group"].tolist())
+    )
+
+else:
+
+    st.success("No weak cells detected.")
+
+# ==============================================================
+# 28. INTELLIGENT CELL BALANCING
+# ==============================================================
+
+st.header("⚖️ Intelligent Cell Balancing")
+
+balancing_active = st.session_state.cell_balancing_active
+
+bal1, bal2, bal3 = st.columns(3)
+
+bal1.metric(
+    "Balancing Status",
+    "ACTIVE" if balancing_active else "INACTIVE"
+)
+
+bal2.metric(
+    "Cells Selected",
+    (
+        ", ".join(
+            [
+                f"C{i+1:02d}"
+                for i, v in enumerate(cell_voltages)
+                if v > cell_average + BALANCING_START_DIFFERENCE
+            ]
+        )
+        or "None"
+    )
+)
+
+bal3.metric(
+    "Balancing Events / Steps",
+    st.session_state.balancing_count
+)
+
+if balancing_active:
+    st.info(
+        "Simulated balancing is active. Selected higher-voltage cells "
+        "are being gradually reduced in the model."
+    )
+else:
+    st.info(
+        "Balancing is inactive. Cell voltages are within the "
+        "simulated balancing activation range."
+    )
+
+st.caption(
+    "This balancing model adjusts simulated cell-voltage offsets. "
+    "It is not a real resistor circuit, balancing current measurement, "
+    "or physical battery balancing."
+)
+
+# ==============================================================
+# 29. CELL BALANCING HISTORY
+# ==============================================================
+
+st.subheader("Cell Balancing History")
+
+if st.session_state.balancing_history:
+
+    balancing_df = pd.DataFrame(
+        st.session_state.balancing_history
+    )
+
+    st.dataframe(
+        balancing_df.tail(50),
+        use_container_width=True,
+        hide_index=True
+    )
+
+else:
+
+    st.info("Cell balancing history will appear after simulation steps.")
+
+# ==============================================================
+# 30. BATTERY PERFORMANCE HISTORY
+# ==============================================================
+
+st.header("📈 Battery Performance History")
+
+if st.session_state.performance_history:
+
+    performance_df = pd.DataFrame(
+        st.session_state.performance_history
+    )
+
+    tabs = st.tabs([
+        "Voltage",
+        "Current",
+        "Temperature",
+        "Power",
+        "SoC"
+    ])
+
+    with tabs[0]:
+
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatter(
+            x=performance_df["Time (s)"],
+            y=performance_df["Voltage (V)"],
+            mode="lines",
+            name="Pack Voltage"
+        ))
+
+        fig.update_layout(
+            template="plotly_dark",
+            xaxis_title="Time (s)",
+            yaxis_title="Voltage (V)"
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tabs[1]:
+
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatter(
+            x=performance_df["Time (s)"],
+            y=performance_df["Current (A)"],
+            mode="lines",
+            name="Effective Current"
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=performance_df["Time (s)"],
+            y=performance_df["Requested Current (A)"],
+            mode="lines",
+            name="Requested Current"
+        ))
+
+        fig.update_layout(
+            template="plotly_dark",
+            xaxis_title="Time (s)",
+            yaxis_title="Current (A)"
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tabs[2]:
+
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatter(
+            x=performance_df["Time (s)"],
+            y=performance_df["Temperature (°C)"],
+            mode="lines",
+            name="Temperature"
+        ))
+
+        fig.update_layout(
+            template="plotly_dark",
+            xaxis_title="Time (s)",
+            yaxis_title="Temperature (°C)"
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tabs[3]:
+
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatter(
+            x=performance_df["Time (s)"],
+            y=performance_df["Power (W)"],
+            mode="lines",
+            name="Power"
+        ))
+
+        fig.update_layout(
+            template="plotly_dark",
+            xaxis_title="Time (s)",
+            yaxis_title="Power (W)"
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tabs[4]:
+
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatter(
+            x=performance_df["Time (s)"],
+            y=performance_df["SoC (%)"],
+            mode="lines",
+            name="State of Charge"
+        ))
+
+        fig.update_layout(
+            template="plotly_dark",
+            xaxis_title="Time (s)",
+            yaxis_title="SoC (%)"
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+else:
+
+    st.info("Performance history will be generated during simulation.")
+
+# ==============================================================
+# 31. FAULT EVENT & RECOVERY LOG
+# ==============================================================
+
+st.header("📝 Fault Event & Recovery Log")
+
+if st.session_state.fault_log:
+
+    fault_df = pd.DataFrame(st.session_state.fault_log)
+
+    st.dataframe(
+        fault_df.tail(100),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.download_button(
+        "⬇ Download Pack Fault Log CSV",
+        data=fault_df.to_csv(index=False),
+        file_name="smart_bms_v4_4_pack_fault_log.csv",
+        mime="text/csv"
+    )
+
+else:
+
+    st.info("No pack protection events recorded.")
+
+# ==============================================================
+# 32. CELL FAULT HISTORY
+# ==============================================================
+
+st.header("🧾 Cell Fault History")
+
+if st.session_state.cell_fault_history:
+
+    cell_fault_df = pd.DataFrame(
+        st.session_state.cell_fault_history
+    )
+
+    st.dataframe(
+        cell_fault_df.tail(100),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.download_button(
+        "⬇ Download Cell Fault History CSV",
+        data=cell_fault_df.to_csv(index=False),
+        file_name="smart_bms_v4_4_cell_fault_history.csv",
+        mime="text/csv"
+    )
+
+else:
+
+    st.info("No cell fault events recorded.")
+
+# ==============================================================
+# 33. DOWNLOAD DATA
+# ==============================================================
+
+st.header("💾 Export Simulation Data")
+
+if st.session_state.performance_history:
+
+    export_df = pd.DataFrame(
+        st.session_state.performance_history
+    )
+
+    st.download_button(
+        "⬇ Download Battery Performance CSV",
+        data=export_df.to_csv(index=False),
+        file_name="smart_bms_v4_4_performance.csv",
+        mime="text/csv"
+    )
+
+if st.session_state.thermal_history:
+
+    thermal_export_df = pd.DataFrame(
+        st.session_state.thermal_history
+    )
+
+    st.download_button(
+        "⬇ Download Thermal History CSV",
+        data=thermal_export_df.to_csv(index=False),
+        file_name="smart_bms_v4_4_thermal_history.csv",
+        mime="text/csv"
+    )
+
+st.download_button(
+    "⬇ Download Cell Voltage CSV",
+    data=cell_df.to_csv(index=False),
+    file_name="smart_bms_v4_4_cell_voltages.csv",
+    mime="text/csv"
+)
+
+# ==============================================================
+# 34. SYSTEM INFORMATION
+# ==============================================================
+
+st.header("ℹ️ System Information")
+
+system_info = {
+    "Application": "Smart EV Battery Management System",
+    "Version": "4.4",
+    "New Module": "Cell Monitoring & Intelligent Balancing",
+    "Battery Configuration": "13S4P Lithium-Ion",
+    "Series Cell Groups": SERIES_CELLS,
+    "Parallel Cells per Group": PARALLEL_CELLS,
+    "Nominal Cell Voltage": f"{CELL_NOMINAL_VOLTAGE:.2f} V",
+    "Nominal Pack Voltage": f"{PACK_NOMINAL_VOLTAGE:.2f} V",
+    "Nominal Pack Capacity": f"{CAPACITY_AH:.2f} Ah",
+    "Pack Internal Resistance": f"{INTERNAL_RESISTANCE:.3f} Ohm",
+    "Simulation Mode": mode,
+    "Cell Scenario": st.session_state.cell_scenario,
+    "Cell Balancing": "Simulated",
+    "Protection": "Warning / Critical / Hysteresis",
+    "Hardware Connection": "Not connected",
+    "Data Type": "Simulated"
+}
+
+st.json(system_info)
+
+# ==============================================================
+# 35. DISCLAIMER
+# ==============================================================
+
+st.divider()
+
+st.caption(
+    "Smart EV BMS V4.4 | Academic Simulation Prototype. "
+    "All battery, cell, protection, thermal, and balancing data "
+    "are simulated. This application is not connected to a real "
+    "battery pack or battery sensors and is not intended for real "
+    "battery protection or safety control."
+)
+
+# ==============================================================
+# END OF SMART EV BMS V4.4
+# ==============================================================
