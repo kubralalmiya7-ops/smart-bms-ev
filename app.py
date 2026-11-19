@@ -1,6 +1,6 @@
 # ==============================================================
 # SMART EV BATTERY MANAGEMENT SYSTEM
-# Version 4.4
+# Version 4.4 Virtual Simulation Edition
 # Cell-Level Monitoring & Intelligent Balancing
 # Reconstructed integrated simulation application
 # ==============================================================
@@ -17,7 +17,7 @@ from streamlit_autorefresh import st_autorefresh
 # ==============================================================
 
 st.set_page_config(
-    page_title="Smart EV BMS V4.4",
+    page_title="Smart EV BMS V4.4 Virtual Simulation Edition",
     page_icon="🔋",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -160,6 +160,8 @@ def initialize_state():
         },
 
         "cell_offsets": np.zeros(SERIES_CELLS),
+        "balance_adjustments": np.zeros(SERIES_CELLS),
+        "logged_weak_cells": [],
         "cell_voltages": np.ones(SERIES_CELLS) * 3.6,
         "cell_balancing_active": False,
         "balancing_count": 0,
@@ -200,7 +202,7 @@ initialize_state()
 # ==============================================================
 
 def timestamp():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%:%S") if False else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def add_fault_event(event, details, severity="INFO"):
@@ -210,6 +212,7 @@ def add_fault_event(event, details, severity="INFO"):
         "Details": details,
         "Severity": severity
     })
+    st.session_state.fault_log = st.session_state.fault_log[-300:]
 
 
 def add_cell_event(event, details, severity="INFO"):
@@ -219,6 +222,7 @@ def add_cell_event(event, details, severity="INFO"):
         "Details": details,
         "Severity": severity
     })
+    st.session_state.cell_fault_history = st.session_state.cell_fault_history[-300:]
 
 
 def clamp(value, low, high):
@@ -386,353 +390,205 @@ def update_protection(voltage, current, temperature):
 # ==============================================================
 
 def generate_cell_voltages(pack_voltage, scenario="Normal cells"):
-
+    """Generate repeatable cell readings without accumulating scenario offsets."""
     average_cell_voltage = pack_voltage / SERIES_CELLS
+    base_offsets = np.array([
+        0.003, -0.004, 0.005, -0.002, 0.001, -0.005, 0.004,
+        -0.001, 0.002, -0.003, 0.005, -0.002, -0.003
+    ], dtype=float)
+    offsets = base_offsets.copy()
 
-    offsets = st.session_state.cell_offsets.copy()
-
-    # ---------------- Cell Scenario Injection ----------------
-    if scenario == "Normal cells":
-        pass
-
-    elif scenario == "Cell imbalance":
+    if scenario == "Cell imbalance":
         offsets[5] += 0.075
         offsets[10] -= 0.055
-
     elif scenario == "Weak cell":
-        offsets[3] -= 0.180
-
+        # Fault injection is applied to cell 4, then the remaining cell groups
+        # share the rest of the pack voltage to keep the pack sum coherent.
+        weak_voltage = 3.05
+        other_indices = [i for i in range(SERIES_CELLS) if i != 3]
+        other_offsets = base_offsets[other_indices].copy()
+        other_offsets -= np.mean(other_offsets)
+        remaining_average = (pack_voltage - weak_voltage) / len(other_indices)
+        voltages = np.full(SERIES_CELLS, remaining_average, dtype=float)
+        voltages[other_indices] += other_offsets
+        voltages[3] = weak_voltage
     elif scenario == "Multiple cell imbalance":
         offsets[1] += 0.090
         offsets[4] -= 0.080
         offsets[8] += 0.065
         offsets[11] -= 0.070
-
     elif scenario == "High cell":
         offsets[7] += 0.180
 
-    # Remove net offset so cell voltage sum remains consistent
-    offsets -= np.mean(offsets)
+    if scenario != "Weak cell":
+        offsets -= np.mean(offsets)
+        voltages = average_cell_voltage + offsets
 
-    voltages = average_cell_voltage + offsets
+    # Balancing offsets are stored separately from scenario injection so the
+    # selected fault does not grow on every refresh.
+    voltages += st.session_state.balance_adjustments
+    voltages = np.clip(voltages, CELL_MIN_VOLTAGE, CELL_MAX_VOLTAGE)
 
-    # Constrain simulated cell voltage
-    voltages = np.clip(
-        voltages,
-        CELL_MIN_VOLTAGE,
-        CELL_MAX_VOLTAGE
-    )
-
-    st.session_state.cell_offsets = offsets
     st.session_state.cell_voltages = voltages
-
+    st.session_state.cell_offsets = offsets.copy()
     return voltages
 
-# ==============================================================
 # 8. CELL BALANCING MODEL
 # ==============================================================
 
 def perform_cell_balancing():
-
+    """Apply small, persistent simulated reductions to high-voltage cells."""
     voltages = st.session_state.cell_voltages.copy()
-
     average_voltage = float(np.mean(voltages))
     difference = float(np.max(voltages) - np.min(voltages))
-
-    eligible_cells = np.where(
-        voltages > average_voltage + BALANCING_START_DIFFERENCE
-    )[0]
-
-    active = (
-        difference >= CELL_IMBALANCE_WARNING
-        and len(eligible_cells) > 0
-    )
-
+    eligible_cells = np.where(voltages > average_voltage + BALANCING_START_DIFFERENCE)[0]
+    active = difference >= CELL_IMBALANCE_WARNING and len(eligible_cells) > 0
     st.session_state.cell_balancing_active = active
 
     if active:
-
-        # Simulation only:
-        # reduce voltage offsets of high cells gradually.
         for index in eligible_cells:
-            voltages[index] -= BALANCING_RATE
-
-        # Keep pack average unchanged in this balancing visualization.
-        voltages += average_voltage - np.mean(voltages)
-
+            st.session_state.balance_adjustments[index] -= BALANCING_RATE
+        st.session_state.balance_adjustments = np.clip(
+            st.session_state.balance_adjustments, -0.12, 0.0
+        )
+        # Reapply adjustments to the current generated readings.
+        voltages = np.clip(
+            voltages - BALANCING_RATE * np.isin(np.arange(SERIES_CELLS), eligible_cells),
+            CELL_MIN_VOLTAGE, CELL_MAX_VOLTAGE
+        )
         st.session_state.balancing_count += 1
-
-        st.session_state.balancing_history.append({
-            "Time": timestamp(),
-            "Status": "BALANCING ACTIVE",
-            "Cells Selected": ", ".join(
-                [f"C{i+1}" for i in eligible_cells]
-            ),
-            "Voltage Difference (V)": difference,
-            "Average Voltage (V)": average_voltage
-        })
-
+        st.session_state.balancing_history = st.session_state.balancing_history[-300:]
+        selected = ", ".join(f"C{i+1:02d}" for i in eligible_cells)
+        # Keep balancing history readable: log only status transitions or every
+        # 10th active step rather than every auto-refresh.
+        if (not st.session_state.balancing_history
+                or st.session_state.balancing_history[-1]["Status"] != "BALANCING ACTIVE"
+                or st.session_state.balancing_count % 10 == 0):
+            st.session_state.balancing_history.append({
+                "Time": timestamp(), "Status": "BALANCING ACTIVE",
+                "Cells Selected": selected,
+                "Voltage Difference (V)": difference,
+                "Average Voltage (V)": average_voltage
+            })
     else:
-        st.session_state.balancing_history.append({
-            "Time": timestamp(),
-            "Status": "BALANCING INACTIVE",
-            "Cells Selected": "None",
-            "Voltage Difference (V)": difference,
-            "Average Voltage (V)": average_voltage
-        })
+        if (not st.session_state.balancing_history
+                or st.session_state.balancing_history[-1]["Status"] != "BALANCING INACTIVE"):
+            st.session_state.balancing_history.append({
+                "Time": timestamp(), "Status": "BALANCING INACTIVE",
+                "Cells Selected": "None",
+                "Voltage Difference (V)": difference,
+                "Average Voltage (V)": average_voltage
+            })
 
-    st.session_state.cell_voltages = np.clip(
-        voltages,
-        CELL_MIN_VOLTAGE,
-        CELL_MAX_VOLTAGE
-    )
-
+    st.session_state.cell_voltages = np.clip(voltages, CELL_MIN_VOLTAGE, CELL_MAX_VOLTAGE)
     return active
 
-# ==============================================================
 # 9. CELL FAULT DETECTION
 # ==============================================================
 
 def update_cell_protection():
-
+    """Log cell-level status changes and individual weak-cell transitions."""
     voltages = st.session_state.cell_voltages
     maximum = float(np.max(voltages))
     minimum = float(np.min(voltages))
     difference = maximum - minimum
-
     cell_state = get_cell_state()
     previous_state = st.session_state.last_cell_state
 
     if cell_state != previous_state:
-
         if cell_state == "WARNING":
-            add_cell_event(
-                "Cell Imbalance Warning",
-                f"Cell imbalance/weak cell detected. ΔV={difference:.3f} V",
-                "WARNING"
-            )
-
+            add_cell_event("Cell Imbalance / Weak Cell Warning",
+                          f"Cell warning detected. ΔV={difference:.3f} V, min={minimum:.3f} V", "WARNING")
         elif cell_state == "CRITICAL":
-            add_cell_event(
-                "Critical Cell Condition",
-                f"Critical cell voltage condition. ΔV={difference:.3f} V, minimum={minimum:.3f} V",
-                "CRITICAL"
-            )
-
-        elif cell_state == "NORMAL":
-            add_cell_event(
-                "Cell Condition Recovered",
-                "Cell voltage condition returned to normal",
-                "INFO"
-            )
-
+            add_cell_event("Critical Cell Condition",
+                          f"Critical cell condition. ΔV={difference:.3f} V, min={minimum:.3f} V", "CRITICAL")
+        else:
+            add_cell_event("Cell Condition Recovered", "Cell voltage condition returned to normal", "INFO")
         st.session_state.last_cell_state = cell_state
 
-    # Individual weak cell events
-    for index, value in enumerate(voltages):
-
-        if value < WEAK_CELL_WARNING_VOLTAGE:
-            severity = (
-                "CRITICAL"
-                if value <= WEAK_CELL_CRITICAL_VOLTAGE
-                else "WARNING"
-            )
-
-            add_cell_event(
-                f"Weak Cell C{index+1:02d}",
-                f"Cell voltage is {value:.3f} V",
-                severity
-            )
-
+    weak_now = [i + 1 for i, v in enumerate(voltages) if v < WEAK_CELL_WARNING_VOLTAGE]
+    weak_before = st.session_state.logged_weak_cells
+    for cell_num in weak_now:
+        if cell_num not in weak_before:
+            v = float(voltages[cell_num - 1])
+            severity = "CRITICAL" if v <= WEAK_CELL_CRITICAL_VOLTAGE else "WARNING"
+            add_cell_event(f"Weak Cell C{cell_num:02d}", f"Cell voltage is {v:.3f} V", severity)
+    for cell_num in weak_before:
+        if cell_num not in weak_now:
+            add_cell_event(f"Weak Cell C{cell_num:02d} Recovered", "Cell voltage returned above weak-cell threshold", "INFO")
+    st.session_state.logged_weak_cells = weak_now
     return cell_state
 
-# ==============================================================
 # 10. SIMULATION ENGINE
 # ==============================================================
 
 def simulation_step(requested_current, duration_seconds=2):
-
+    """Advance the virtual pack by one time step using protected current."""
+    requested_current = float(requested_current)
+    st.session_state.requested_current = requested_current
     old_temp = st.session_state.temperature
-    old_soc = st.session_state.soc
 
-    st.session_state.requested_current = float(requested_current)
+    # First determine pack protection from the current pack conditions.
+    pack_voltage = st.session_state.pack_voltage
+    update_protection(pack_voltage, requested_current, old_temp)
+    state = get_protection_state()
+    target_current = (0.0 if state == "CRITICAL" else
+                      requested_current * 0.5 if state == "WARNING" else requested_current)
 
-    # ==========================================================
-    # SOC COULOMB COUNTING
-    # ==========================================================
-
-    current = float(requested_current)
-
-    soc_change = (
-        current * duration_seconds
-        / (3600.0 * CAPACITY_AH)
-        * 100.0
-    )
-
-    st.session_state.soc = clamp(
-        st.session_state.soc - soc_change,
-        0.0,
-        100.0
-    )
-
-    st.session_state.consumed_capacity += (
-        max(current, 0.0) * duration_seconds / 3600.0
-    )
-
-    # ==========================================================
-    # PACK VOLTAGE MODEL
-    # ==========================================================
-
-    ocv = pack_ocv_from_soc(st.session_state.soc)
-
-    pack_voltage = (
-        ocv - current * INTERNAL_RESISTANCE
-    )
-
-    pack_voltage = clamp(
-        pack_voltage,
-        PACK_MIN_VOLTAGE,
-        PACK_MAX_VOLTAGE
-    )
-
-    st.session_state.pack_voltage = pack_voltage
-
-    # ==========================================================
-    # THERMAL MODEL
-    # ==========================================================
-
-    heat_generated = (
-        (current ** 2)
-        * INTERNAL_RESISTANCE
-    )
-
-    cooling = (
-        COOLING_COEFFICIENT
-        * (st.session_state.temperature - AMBIENT_TEMP)
-    )
-
-    net_heat = heat_generated - cooling
-
-    temp_change = (
-        net_heat * duration_seconds
-        / THERMAL_CAPACITY
-    )
-
-    st.session_state.temperature += temp_change
-
-    st.session_state.temperature = clamp(
-        st.session_state.temperature,
-        AMBIENT_TEMP,
-        80.0
-    )
-
-    st.session_state.heating_rate = (
-        st.session_state.temperature - old_temp
-    ) / duration_seconds
-
-    st.session_state.peak_temperature = max(
-        st.session_state.peak_temperature,
-        st.session_state.temperature
-    )
-
-    st.session_state.cooling_power = max(
-        0.0,
-        COOLING_COEFFICIENT
-        * (st.session_state.temperature - AMBIENT_TEMP)
-    )
-
-    # ==========================================================
-    # PROTECTION
-    # ==========================================================
-
-    update_protection(
-        st.session_state.pack_voltage,
-        requested_current,
-        st.session_state.temperature
-    )
-
-    protection_state = get_protection_state()
-
-    if protection_state == "CRITICAL":
-        target_current = 0.0
-
-    elif protection_state == "WARNING":
-        target_current = requested_current * 0.5
-
-    else:
-        target_current = requested_current
-
-    # Gradual load recovery
-    if protection_state == "NORMAL":
-
+    # Gradual restoration when protection has cleared.
+    if state == "NORMAL":
         difference = target_current - st.session_state.effective_current
-
         if abs(difference) <= 1.0:
             st.session_state.effective_current = target_current
         else:
-            st.session_state.effective_current += (
-                1.0 if difference > 0 else -1.0
-            )
-
+            st.session_state.effective_current += 1.0 if difference > 0 else -1.0
     else:
         st.session_state.effective_current = target_current
 
-    # Recalculate terminal voltage using protected current
-    protected_voltage = (
-        pack_ocv_from_soc(st.session_state.soc)
-        - st.session_state.effective_current
-        * INTERNAL_RESISTANCE
-    )
+    current = float(st.session_state.effective_current)
+    # SoC and thermal calculations use the effective, protected load.
+    soc_change = current * duration_seconds / (3600.0 * CAPACITY_AH) * 100.0
+    st.session_state.soc = clamp(st.session_state.soc - soc_change, 0.0, 100.0)
+    st.session_state.consumed_capacity += max(current, 0.0) * duration_seconds / 3600.0
 
-    st.session_state.pack_voltage = clamp(
-        protected_voltage,
-        PACK_MIN_VOLTAGE,
-        PACK_MAX_VOLTAGE
-    )
+    ocv = pack_ocv_from_soc(st.session_state.soc)
+    pack_voltage = clamp(ocv - current * INTERNAL_RESISTANCE, PACK_MIN_VOLTAGE, PACK_MAX_VOLTAGE)
+    st.session_state.pack_voltage = pack_voltage
 
-    # Final protection check after current reduction
-    update_protection(
-        st.session_state.pack_voltage,
-        st.session_state.effective_current,
-        st.session_state.temperature
-    )
+    heat_generated = current ** 2 * INTERNAL_RESISTANCE
+    cooling = COOLING_COEFFICIENT * (st.session_state.temperature - AMBIENT_TEMP)
+    net_heat = heat_generated - cooling
+    temp_change = net_heat * duration_seconds / THERMAL_CAPACITY
+    st.session_state.temperature = clamp(st.session_state.temperature + temp_change, AMBIENT_TEMP, 80.0)
+    st.session_state.heating_rate = (st.session_state.temperature - old_temp) / duration_seconds
+    st.session_state.peak_temperature = max(st.session_state.peak_temperature, st.session_state.temperature)
+    st.session_state.cooling_power = max(0.0, COOLING_COEFFICIENT * (st.session_state.temperature - AMBIENT_TEMP))
 
-    # ==========================================================
-    # POWER & ENERGY
-    # ==============================================================
+    # Evaluate pack protection once more against updated estimates, then act
+    # immediately on any newly triggered critical state.
+    update_protection(st.session_state.pack_voltage, current, st.session_state.temperature)
+    final_state = get_protection_state()
+    if final_state == "CRITICAL":
+        st.session_state.effective_current = 0.0
+    elif final_state == "WARNING":
+        st.session_state.effective_current = requested_current * 0.5
 
-    power = (
-        st.session_state.pack_voltage
-        * st.session_state.effective_current
-    )
-
-    if power >= 0:
-        st.session_state.energy_discharged += (
-            power * duration_seconds / 3600.0
-        )
-    else:
-        st.session_state.energy_charged += (
-            abs(power) * duration_seconds / 3600.0
-        )
-
-    # ==========================================================
-    # CELL MODEL
-    # ==============================================================
-
-    generate_cell_voltages(
-        st.session_state.pack_voltage,
-        st.session_state.cell_scenario
-    )
-
+    # Generate cell readings, balancing, then cell-protection checks.
+    generate_cell_voltages(st.session_state.pack_voltage, st.session_state.cell_scenario)
     perform_cell_balancing()
-    update_cell_protection()
+    cell_state = update_cell_protection()
+    if cell_state == "CRITICAL":
+        st.session_state.effective_current = 0.0
+    elif cell_state == "WARNING" and final_state == "NORMAL":
+        st.session_state.effective_current = requested_current * 0.5
 
-    # ==========================================================
-    # HISTORY
-    # ==============================================================
+    power = st.session_state.pack_voltage * st.session_state.effective_current
+    if power >= 0:
+        st.session_state.energy_discharged += power * duration_seconds / 3600.0
+    else:
+        st.session_state.energy_charged += abs(power) * duration_seconds / 3600.0
 
     st.session_state.simulation_time += duration_seconds
-
     st.session_state.performance_history.append({
         "Time (s)": st.session_state.simulation_time,
         "Voltage (V)": st.session_state.pack_voltage,
@@ -742,7 +598,6 @@ def simulation_step(requested_current, duration_seconds=2):
         "Power (W)": power,
         "SoC (%)": st.session_state.soc
     })
-
     st.session_state.thermal_history.append({
         "Time (s)": st.session_state.simulation_time,
         "Temperature (°C)": st.session_state.temperature,
@@ -750,124 +605,73 @@ def simulation_step(requested_current, duration_seconds=2):
         "Cooling Power (W)": st.session_state.cooling_power
     })
 
-# ==============================================================
 # 11. MANUAL SIMULATION ADVANCE
 # ==============================================================
 
 def manual_simulation_step():
+    """Advance a 10-second manual test using entered voltage/current/temp."""
+    duration_seconds = 10.0
+    requested = float(st.session_state.manual_current)
+    voltage = float(st.session_state.manual_voltage)
+    temperature = float(st.session_state.manual_temperature)
+    st.session_state.requested_current = requested
+    st.session_state.pack_voltage = voltage
+    st.session_state.temperature = temperature
 
-    # Manual mode uses user-provided voltage, current and temperature.
-    # Temperature is held at the entered value for fault testing.
-
-    st.session_state.requested_current = st.session_state.manual_current
-    st.session_state.pack_voltage = st.session_state.manual_voltage
-    st.session_state.temperature = st.session_state.manual_temperature
-
-    update_protection(
-        st.session_state.pack_voltage,
-        st.session_state.requested_current,
-        st.session_state.temperature
-    )
-
+    update_protection(voltage, requested, temperature)
     state = get_protection_state()
-
-    if state == "CRITICAL":
-        target_current = 0.0
-
-    elif state == "WARNING":
-        target_current = st.session_state.requested_current * 0.5
-
-    else:
-        target_current = st.session_state.requested_current
-
-    # One amp per manual 10-second advance while in normal recovery
+    target = (0.0 if state == "CRITICAL" else
+              requested * 0.5 if state == "WARNING" else requested)
     if state == "NORMAL":
-
-        difference = target_current - st.session_state.effective_current
-
+        difference = target - st.session_state.effective_current
         if abs(difference) <= 1.0:
-            st.session_state.effective_current = target_current
+            st.session_state.effective_current = target
         else:
-            st.session_state.effective_current += (
-                1.0 if difference > 0 else -1.0
-            )
-
+            st.session_state.effective_current += 1.0 if difference > 0 else -1.0
     else:
-        st.session_state.effective_current = target_current
+        st.session_state.effective_current = target
 
-    # Update SOC based on protected effective current
-    current = st.session_state.effective_current
-
+    effective = float(st.session_state.effective_current)
     st.session_state.soc = clamp(
-        st.session_state.soc
-        - current * 10.0
-        / (3600.0 * CAPACITY_AH)
-        * 100.0,
-        0.0,
-        100.0
+        st.session_state.soc - effective * duration_seconds / (3600.0 * CAPACITY_AH) * 100.0,
+        0.0, 100.0
     )
-
-    st.session_state.consumed_capacity += (
-        max(current, 0.0) * 10.0 / 3600.0
-    )
-
-    # Temperature is user-controlled in manual mode
+    st.session_state.consumed_capacity += max(effective, 0.0) * duration_seconds / 3600.0
     st.session_state.heating_rate = 0.0
-    st.session_state.peak_temperature = max(
-        st.session_state.peak_temperature,
-        st.session_state.temperature
-    )
+    st.session_state.peak_temperature = max(st.session_state.peak_temperature, temperature)
+    st.session_state.cooling_power = max(0.0, COOLING_COEFFICIENT * (temperature - AMBIENT_TEMP))
 
-    st.session_state.cooling_power = max(
-        0.0,
-        COOLING_COEFFICIENT
-        * (st.session_state.temperature - AMBIENT_TEMP)
-    )
-
-    # Power and energy
-    power = (
-        st.session_state.pack_voltage
-        * st.session_state.effective_current
-    )
-
-    if power >= 0:
-        st.session_state.energy_discharged += (
-            power * 10.0 / 3600.0
-        )
-    else:
-        st.session_state.energy_charged += (
-            abs(power) * 10.0 / 3600.0
-        )
-
-    # Update cell voltages from manual pack voltage
-    generate_cell_voltages(
-        st.session_state.pack_voltage,
-        st.session_state.cell_scenario
-    )
-
+    generate_cell_voltages(voltage, st.session_state.cell_scenario)
     perform_cell_balancing()
-    update_cell_protection()
+    cell_state = update_cell_protection()
+    if cell_state == "CRITICAL":
+        st.session_state.effective_current = 0.0
+    elif cell_state == "WARNING" and state == "NORMAL":
+        st.session_state.effective_current = requested * 0.5
+
+    power = voltage * st.session_state.effective_current
+    if power >= 0:
+        st.session_state.energy_discharged += power * duration_seconds / 3600.0
+    else:
+        st.session_state.energy_charged += abs(power) * duration_seconds / 3600.0
 
     st.session_state.simulation_time += 10
-
     st.session_state.performance_history.append({
         "Time (s)": st.session_state.simulation_time,
-        "Voltage (V)": st.session_state.pack_voltage,
+        "Voltage (V)": voltage,
         "Current (A)": st.session_state.effective_current,
-        "Requested Current (A)": st.session_state.requested_current,
-        "Temperature (°C)": st.session_state.temperature,
+        "Requested Current (A)": requested,
+        "Temperature (°C)": temperature,
         "Power (W)": power,
         "SoC (%)": st.session_state.soc
     })
-
     st.session_state.thermal_history.append({
         "Time (s)": st.session_state.simulation_time,
-        "Temperature (°C)": st.session_state.temperature,
-        "Heating Rate (°C/s)": st.session_state.heating_rate,
+        "Temperature (°C)": temperature,
+        "Heating Rate (°C/s)": 0.0,
         "Cooling Power (W)": st.session_state.cooling_power
     })
 
-# ==============================================================
 # 12. RESET SYSTEM
 # ==============================================================
 
@@ -885,7 +689,7 @@ def reset_system():
 # ==============================================================
 
 st.sidebar.title("🔋 Smart EV BMS")
-st.sidebar.caption("Version 4.4 | Cell Monitoring & Balancing")
+st.sidebar.caption("Version 4.4 Virtual Simulation Edition | Cell Monitoring & Balancing")
 
 mode = st.sidebar.radio(
     "Operating Mode",
@@ -1852,7 +1656,7 @@ st.header("ℹ️ System Information")
 
 system_info = {
     "Application": "Smart EV Battery Management System",
-    "Version": "4.4",
+    "Version": "4.4 Virtual Simulation Edition",
     "New Module": "Cell Monitoring & Intelligent Balancing",
     "Battery Configuration": "13S4P Lithium-Ion",
     "Series Cell Groups": SERIES_CELLS,
@@ -1878,7 +1682,7 @@ st.json(system_info)
 st.divider()
 
 st.caption(
-    "Smart EV BMS V4.4 | Academic Simulation Prototype. "
+    "Smart EV BMS V4.4 Virtual Simulation Edition | Academic Simulation Prototype. "
     "All battery, cell, protection, thermal, and balancing data "
     "are simulated. This application is not connected to a real "
     "battery pack or battery sensors and is not intended for real "
@@ -1886,5 +1690,5 @@ st.caption(
 )
 
 # ==============================================================
-# END OF SMART EV BMS V4.4
+# END OF SMART EV BMS V4.4 VIRTUAL SIMULATION EDITION
 # ==============================================================
