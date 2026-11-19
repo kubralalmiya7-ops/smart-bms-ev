@@ -260,7 +260,7 @@ def evaluate_protection(voltage, requested_current, temperature, cells):
         faults.append("High temperature warning")
 
     # Cell monitoring
-    imbalance = float(np.max(cells) - np.min(cells)
+    imbalance = float(np.max(cells) - np.min(cells))
 
     if imbalance >= CELL_IMBALANCE_CRITICAL:
         faults.append("Critical cell imbalance")
