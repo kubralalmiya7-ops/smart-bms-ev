@@ -900,17 +900,32 @@ w2.metric("Current to send", f"{wokwi_current:.1f} A")
 w3.metric("Temperature to send", f"{wokwi_temperature:.1f} °C")
 st.caption(f"Value source: {source_label}")
 
-if st.button("📡 Send Current Values to Wokwi", type="primary"):
+# Publish automatically whenever the displayed battery values change.
+# Automatic mode reruns with the simulation refresh; manual mode reruns
+# when a slider value changes. No separate Send button is required.
+wokwi_payload = (
+    f"{wokwi_voltage:.1f},"
+    f"{wokwi_current:.1f},"
+    f"{wokwi_temperature:.1f}"
+)
+
+if wokwi_payload != st.session_state.get("last_wokwi_payload"):
     try:
         sent_payload = publish_to_wokwi(
             wokwi_voltage, wokwi_current, wokwi_temperature
         )
+        st.session_state["last_wokwi_payload"] = wokwi_payload
         st.success(
-            f"Published: {sent_payload} | Topic: {MQTT_TOPIC}. "
+            f"Automatically published: {sent_payload} | Topic: {MQTT_TOPIC}. "
             "Check the Wokwi Serial Monitor for confirmation."
         )
     except Exception as exc:
-        st.error(f"Could not send values to Wokwi: {exc}")
+        st.error(f"Could not automatically send values to Wokwi: {exc}")
+else:
+    st.caption(
+        "MQTT automatic publishing is active. No new message was sent "
+        "because the battery values have not changed."
+    )
 
 st.divider()
 
@@ -1749,7 +1764,7 @@ system_info = {
     "Cell Scenario": st.session_state.cell_scenario,
     "Cell Balancing": "Simulated",
     "Protection": "Warning / Critical / Hysteresis",
-    "Hardware Connection": "Wokwi MQTT command bridge (publish on button click)",
+    "Hardware Connection": "Wokwi MQTT bridge (automatic publishing when values change in both modes)",
     "Data Type": "Simulated"
 }
 
