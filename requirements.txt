@@ -1,6 +1,6 @@
-streamlit
-pandas
-numpy
-plotly
-streamlit-autorefresh
-paho-mqtt>=2.0
+streamlit>=1.32,<2
+pandas>=2.0,<3
+numpy>=1.26,<3
+plotly>=5.18,<7
+streamlit-autorefresh>=1.0.1,<2
+paho-mqtt==2.1.0
