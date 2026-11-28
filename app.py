@@ -327,40 +327,58 @@ MQTT_TOPIC = "major1/smartbms/control/evbms44"
 
 
 def publish_to_wokwi(voltage, current, temperature):
-    """Publish one battery sample to Wokwi over secure MQTT WebSockets."""
-    payload = f"{float(voltage):.1f},{float(current):.1f},{float(temperature):.1f}"
+    """
+    Publish one battery sample to the ESP32 using MQTT over secure WebSockets.
 
-    # Support both Paho MQTT 1.x and 2.x installations.
-    client_id = f"StreamlitBMS-{uuid.uuid4().hex[:10]}"
-    try:
-        client = mqtt.Client(
-            callback_api_version=mqtt.CallbackAPIVersion.VERSION1,
-            transport="websockets"
-        )
-    except (AttributeError, TypeError):
-        client = mqtt.Client(client_id=client_id, transport="websockets")
+    Streamlit uses WSS on port 8081. The ESP32 uses ordinary MQTT/TCP
+    on port 1883. Both use the same broker and topic.
+    """
+    payload = (
+        f"{float(voltage):.1f},"
+        f"{float(current):.1f},"
+        f"{float(temperature):.1f}"
+    )
 
+    # Use a unique ID so this Streamlit client cannot replace another client.
+    client_id = f"StreamlitBMS-{uuid.uuid4().hex[:12]}"
+
+    client = mqtt.Client(
+        callback_api_version=mqtt.CallbackAPIVersion.VERSION1,
+        client_id=client_id,
+        transport="websockets"
+    )
     client.tls_set()
-    client.ws_set_options(path="/mqtt")
-    client.connect(MQTT_BROKER,MQTT_PORT,60)
-    
+    client.ws_set_options(path=MQTT_PATH)
 
     try:
+        # Connect exactly once, then run the network loop while publishing.
         client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
         client.loop_start()
-        info = client.publish(MQTT_TOPIC, payload, qos=0, retain=False)
+
+        info = client.publish(
+            MQTT_TOPIC,
+            payload=payload,
+            qos=0,
+            retain=False
+        )
+
+        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+            raise RuntimeError(
+                f"MQTT publish could not be queued (code {info.rc})."
+            )
+
         info.wait_for_publish(timeout=10)
         if not info.is_published():
             raise TimeoutError("MQTT publish timed out before completion.")
+
         return payload
+
     finally:
         try:
-            client.loop_stop()
+            client.disconnect()
         finally:
-            try:
-                client.disconnect()
-            except Exception:
-                pass
+            client.loop_stop()
+
 
 # 6. PROTECTION SYSTEM WITH HYSTERESIS
 # ==============================================================
