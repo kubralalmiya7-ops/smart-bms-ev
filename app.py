@@ -321,6 +321,8 @@ def get_system_state():
 
 MQTT_BROKER = "test.mosquitto.org"
 MQTT_PORT = 8081
+MQTT_TRANSPORT = "websockets"
+MQTT_PATH = "/mqtt"
 MQTT_TOPIC = "major1/smartbms/control/evbms44"
 
 
