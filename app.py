@@ -10,6 +10,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
+import time
 import uuid
 import paho.mqtt.client as mqtt
 from streamlit_autorefresh import st_autorefresh
@@ -266,7 +267,7 @@ def get_protection_state():
 
 
 def get_protection_action():
-    state = get_protection_state()
+    state = get_system_state()
 
     if state == "CRITICAL":
         return "Critical Shutdown — Load Disabled"
@@ -300,6 +301,17 @@ def get_cell_state():
 
     return "NORMAL"
 
+def get_system_state():
+    """Combine pack-level and cell-level faults into one dashboard state."""
+    pack_state = get_protection_state()
+    cell_state = get_cell_state()
+
+    if "CRITICAL" in (pack_state, cell_state):
+        return "CRITICAL"
+    if "WARNING" in (pack_state, cell_state):
+        return "WARNING"
+    return "NORMAL"
+
 # ==============================================================
 
 
@@ -313,29 +325,39 @@ MQTT_TOPIC = "major1/smartbms/control/evbms44"
 
 
 def publish_to_wokwi(voltage, current, temperature):
-    """Send battery values to the Wokwi ESP32 using MQTT over WebSockets."""
+    """Publish one battery sample to Wokwi over secure MQTT WebSockets."""
     payload = f"{float(voltage):.1f},{float(current):.1f},{float(temperature):.1f}"
-    client = mqtt.Client(
-        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-        client_id=f"StreamlitBMS-{uuid.uuid4().hex[:10]}",
-        transport="websockets"
-    )
+
+    # Support both Paho MQTT 1.x and 2.x installations.
+    client_id = f"StreamlitBMS-{uuid.uuid4().hex[:10]}"
+    try:
+        client = mqtt.Client(
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            client_id=client_id,
+            transport="websockets"
+        )
+    except (AttributeError, TypeError):
+        client = mqtt.Client(client_id=client_id, transport="websockets")
+
     client.ws_set_options(path="/mqtt")
     client.tls_set()
+
     try:
         client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
         client.loop_start()
         info = client.publish(MQTT_TOPIC, payload, qos=0, retain=False)
         info.wait_for_publish(timeout=10)
         if not info.is_published():
-            raise TimeoutError("The MQTT message was not confirmed as published.")
+            raise TimeoutError("MQTT publish timed out before completion.")
         return payload
     finally:
         try:
             client.loop_stop()
-            client.disconnect()
-        except Exception:
-            pass
+        finally:
+            try:
+                client.disconnect()
+            except Exception:
+                pass
 
 # 6. PROTECTION SYSTEM WITH HYSTERESIS
 # ==============================================================
@@ -843,9 +865,35 @@ else:
     )
 
     st.sidebar.caption(
-        "Manual mode lets you test faults. "
-        "The entered temperature is held for the test."
+        "Manual mode previews protection as sliders change. "
+        "Press Advance to record a 10-second simulation step."
     )
+
+    # Refresh periodically so MQTT can resend the latest values if Wokwi reconnects.
+    st_autorefresh(interval=5000, key="manual_refresh")
+
+    # Apply a live, zero-time preview: update readings and protection without
+    # advancing SoC, energy, or simulation time.
+    st.session_state.pack_voltage = float(st.session_state.manual_voltage)
+    st.session_state.temperature = float(st.session_state.manual_temperature)
+    st.session_state.requested_current = float(st.session_state.manual_current)
+    update_protection(
+        st.session_state.pack_voltage,
+        st.session_state.requested_current,
+        st.session_state.temperature
+    )
+    generate_cell_voltages(
+        st.session_state.pack_voltage,
+        st.session_state.cell_scenario
+    )
+    preview_cell_state = get_cell_state()
+    preview_state = get_system_state()
+    if preview_state == "CRITICAL":
+        st.session_state.effective_current = 0.0
+    elif preview_state == "WARNING":
+        st.session_state.effective_current = st.session_state.requested_current * 0.5
+    else:
+        st.session_state.effective_current = st.session_state.requested_current
 
     if st.sidebar.button(
         "▶ Advance Manual Simulation (10 sec)",
@@ -900,31 +948,36 @@ w2.metric("Current to send", f"{wokwi_current:.1f} A")
 w3.metric("Temperature to send", f"{wokwi_temperature:.1f} °C")
 st.caption(f"Value source: {source_label}")
 
-# Publish automatically whenever the displayed battery values change.
-# Automatic mode reruns with the simulation refresh; manual mode reruns
-# when a slider value changes. No separate Send button is required.
+# Publish when values change, on a periodic heartbeat, or when the user
+# explicitly requests a resend. The heartbeat helps after a Wokwi restart.
 wokwi_payload = (
     f"{wokwi_voltage:.1f},"
     f"{wokwi_current:.1f},"
     f"{wokwi_temperature:.1f}"
 )
 
-if wokwi_payload != st.session_state.get("last_wokwi_payload"):
+send_now = st.button("📡 Send / Resend values to Wokwi", key="send_wokwi_now")
+last_publish_time = float(st.session_state.get("last_wokwi_publish_time", 0.0))
+heartbeat_due = (time.monotonic() - last_publish_time) >= 10.0
+payload_changed = wokwi_payload != st.session_state.get("last_wokwi_payload")
+
+if send_now or payload_changed or heartbeat_due:
     try:
         sent_payload = publish_to_wokwi(
             wokwi_voltage, wokwi_current, wokwi_temperature
         )
         st.session_state["last_wokwi_payload"] = wokwi_payload
+        st.session_state["last_wokwi_publish_time"] = time.monotonic()
         st.success(
-            f"Automatically published: {sent_payload} | Topic: {MQTT_TOPIC}. "
-            "Check the Wokwi Serial Monitor for confirmation."
+            f"Published: {sent_payload} | Topic: {MQTT_TOPIC}. "
+            "Check the Wokwi Serial Monitor for the received message."
         )
     except Exception as exc:
-        st.error(f"Could not automatically send values to Wokwi: {exc}")
+        st.error(f"Could not send values to Wokwi: {exc}")
 else:
     st.caption(
-        "MQTT automatic publishing is active. No new message was sent "
-        "because the battery values have not changed."
+        "MQTT connection is ready. Values are resent automatically every "
+        "10 seconds and whenever the battery readings change."
     )
 
 st.divider()
@@ -934,16 +987,17 @@ st.divider()
 
 protection_state = get_protection_state()
 cell_state = get_cell_state()
+system_state = get_system_state()
 protection_action = get_protection_action()
 
-if protection_state == "NORMAL":
+if system_state == "NORMAL":
     st.markdown(
         '<div class="status-normal">🟢 SYSTEM NORMAL — '
         'NO ACTIVE PACK FAULT</div>',
         unsafe_allow_html=True
     )
 
-elif protection_state == "WARNING":
+elif system_state == "WARNING":
     st.markdown(
         '<div class="status-warning">🟠 WARNING — '
         'LOAD REDUCTION ACTIVE</div>',
@@ -966,7 +1020,7 @@ elif cell_state == "WARNING":
 else:
     st.error("Cell Monitoring: Critical cell condition")
 
-st.info(f"**Safety Action:** {protection_action}")
+st.info(f"**Combined Pack + Cell Status:** {system_state}  |  **Safety Action:** {protection_action}")
 
 # ==============================================================
 # 18. BATTERY OVERVIEW
@@ -1764,7 +1818,7 @@ system_info = {
     "Cell Scenario": st.session_state.cell_scenario,
     "Cell Balancing": "Simulated",
     "Protection": "Warning / Critical / Hysteresis",
-    "Hardware Connection": "Wokwi MQTT bridge (automatic publishing when values change in both modes)",
+    "Hardware Connection": "Wokwi secure MQTT WebSockets bridge with change-based and 10-second heartbeat publishing",
     "Data Type": "Simulated"
 }
 
