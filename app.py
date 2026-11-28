@@ -334,15 +334,16 @@ def publish_to_wokwi(voltage, current, temperature):
     client_id = f"StreamlitBMS-{uuid.uuid4().hex[:10]}"
     try:
         client = mqtt.Client(
-            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-            client_id=client_id,
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION1,
             transport="websockets"
         )
     except (AttributeError, TypeError):
         client = mqtt.Client(client_id=client_id, transport="websockets")
 
-    client.ws_set_options(path="/mqtt")
     client.tls_set()
+    client.ws_set_options(path="/mqtt")
+    client.connect(MQTT_BROKER,MQTT_PORT,60)
+    
 
     try:
         client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
